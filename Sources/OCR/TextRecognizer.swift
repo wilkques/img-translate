@@ -5,6 +5,9 @@ struct RecognizedTextBlock {
     let text: String
     /// Vision 原生格式:正規化座標(0-1),原點左下角
     let normalizedBoundingBox: CGRect
+    /// Vision 對這段辨識結果的信心值(0-1),VLM 混合式架構下只當除錯/排序參考用,
+    /// 不影響本文字內容是否採用(文字內容一律交給 VLM 判斷)。
+    let confidence: Float
 }
 
 enum TextRecognizer {
@@ -25,13 +28,19 @@ enum TextRecognizer {
                 let observations = (request.results as? [VNRecognizedTextObservation]) ?? []
                 let blocks = observations.compactMap { obs -> RecognizedTextBlock? in
                     guard let candidate = obs.topCandidates(1).first else { return nil }
-                    return RecognizedTextBlock(text: candidate.string, normalizedBoundingBox: obs.boundingBox)
+                    return RecognizedTextBlock(
+                        text: candidate.string,
+                        normalizedBoundingBox: obs.boundingBox,
+                        confidence: candidate.confidence)
                 }
                 continuation.resume(returning: blocks)
             }
             request.recognitionLevel = .accurate
             request.usesLanguageCorrection = true
             request.recognitionLanguages = recognitionLanguages
+            // 濾掉太小的雜訊框(例如漫畫畫面裡的細小線條被誤判成文字),
+            // 混合式架構下每個框都要多跑一次 VLM 推理,少一個雜訊框就少一次呼叫。
+            request.minimumTextHeight = 0.01
 
             let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
             do {

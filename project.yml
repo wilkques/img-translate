@@ -63,7 +63,7 @@ targets:
       # swift-syntax macro plugin,編譯時間會爆掉)。改連 swift-huggingface +
       # swift-transformers,自己手寫轉接層(HuggingFaceBridge.swift)。
       - package: mlx-swift-lm
-        products: [MLXLLM, MLXLMCommon]
+        products: [MLXLLM, MLXVLM, MLXLMCommon]
       - package: mlx-swift
         product: MLX
       - package: swift-huggingface

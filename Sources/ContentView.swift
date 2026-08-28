@@ -3,12 +3,20 @@ import UIKit
 import Foundation
 
 struct ContentView: View {
+    enum EngineKind: String, CaseIterable {
+        case vision = "視覺模型(VLM 讀圖)"
+        case text = "文字模型(OCR+TranslateGemma)"
+    }
+
     @State private var blocks: [TextBlock] = []
+    @State private var cropPreviews: [UUID: UIImage] = [:]
     @State private var showTranslated = true
     @State private var status = "準備中…"
     @State private var imageSize: CGSize = .zero
     @State private var smokeTestResult = ""
+    @State private var engineKind: EngineKind = .vision
     @StateObject private var localEngine = LocalLLMTranslationEngine()
+    @StateObject private var vlmEngine = VLMTranslationEngine()
 
     private let image: UIImage? = {
         guard let path = Bundle.main.path(forResource: "sample-es", ofType: "jpg"),
@@ -19,7 +27,7 @@ struct ContentView: View {
     @State private var sourceLanguage = "es"
     @State private var targetLanguage = "zh-Hant-TW"
 
-    /// 固定清單,對應 `LocalLLMTranslationEngine.languageNameMap` 有映射的語言代碼。
+    /// 固定清單,對應 `LocalLLMTranslationEngine.languageNameMap`/`LanguageNames` 有映射的語言代碼。
     private let languageOptions: [(code: String, label: String)] = [
         ("es", "西班牙文"),
         ("en", "英文"),
@@ -36,7 +44,7 @@ struct ContentView: View {
             VStack(spacing: 12) {
                 languagePickers
 
-                localEngineStatusLine
+                enginePicker
 
                 GeometryReader { geo in
                     ZStack {
@@ -47,13 +55,14 @@ struct ContentView: View {
                                 .frame(width: geo.size.width, height: geo.size.height)
                         }
                         if showTranslated {
-                            ForEach(Self.mergedOverlayGroups(from: blocks, imageSize: imageSize)) { group in
+                            ForEach(blocks) { block in
                                 let rect = CoordinateTransform.viewRect(
-                                    forImagePixelRect: group.pixelRect,
+                                    forImagePixelRect: block.pixelRect,
                                     imagePixelSize: imageSize,
                                     containerSize: geo.size
                                 )
-                                BubbleOverlayView(text: group.text, rect: rect)
+                                BubbleOverlayView(
+                                    text: block.translatedText ?? block.visionText, rect: rect)
                             }
                         }
                     }
@@ -72,7 +81,33 @@ struct ContentView: View {
             }
             .padding()
             .navigationTitle("ImgTranslate")
-            .task(id: "\(sourceLanguage)|\(targetLanguage)") { await runPipeline() }
+            .task(id: "\(sourceLanguage)|\(targetLanguage)|\(engineKind.rawValue)") {
+                await runPipeline()
+            }
+        }
+    }
+
+    private var enginePicker: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Picker("翻譯引擎", selection: $engineKind) {
+                ForEach(EngineKind.allCases, id: \.self) { kind in
+                    Text(kind.rawValue).tag(kind)
+                }
+            }
+            .pickerStyle(.segmented)
+            // 兩個模型不能同時載入(2.2GB+3.1GB 太緊,加推理開銷會逼近/超過
+            // LiveContainer 的記憶體上限),切換引擎時把沒在用的那個卸載掉。
+            .onChange(of: engineKind) { _, newValue in
+                switch newValue {
+                case .vision: localEngine.unload()
+                case .text: vlmEngine.unload()
+                }
+            }
+
+            switch engineKind {
+            case .text: localEngineStatusLine
+            case .vision: vlmEngineStatusLine
+            }
         }
     }
 
@@ -99,6 +134,31 @@ struct ContentView: View {
         }
     }
 
+    @ViewBuilder
+    private var vlmEngineStatusLine: some View {
+        switch vlmEngine.phase {
+        case .idle:
+            EmptyView()
+        case .downloading(let fraction):
+            ProgressView(value: fraction) {
+                Text("下載視覺模型中 \(Int(fraction * 100))%(約 3.1GB,首次執行請連 WiFi)")
+                    .font(.caption2)
+            }
+        case .loadingWeights:
+            ProgressView { Text("載入模型權重中…").font(.caption2) }
+        case .warmingUp:
+            ProgressView { Text("首次暖機中(編譯 Metal pipeline)…").font(.caption2) }
+        case .translating(let done, let total):
+            ProgressView(value: Double(done), total: Double(max(total, 1))) {
+                Text("視覺模型讀圖翻譯中 \(done)/\(total)").font(.caption2)
+            }
+        case .ready:
+            Text("視覺模型就緒").font(.caption2).foregroundStyle(.secondary)
+        case .failed(let message):
+            Text("視覺模型失敗:\(message)").font(.caption2).foregroundStyle(.red)
+        }
+    }
+
     private var languagePickers: some View {
         HStack {
             Picker("來源語言", selection: $sourceLanguage) {
@@ -117,62 +177,6 @@ struct ContentView: View {
         .font(.caption)
     }
 
-    /// 合併後的疊字群組:同一個對話框裡常常被 Vision 拆成好幾行各自的 bbox,
-    /// 各自畫一個遮色框會彼此邊緣對不齊、疊出一團(裝機實測過)。把靠近/重疊的
-    /// 文字框合併成一個,裡面塞多行文字,只畫一個乾淨的框。
-    private struct MergedOverlayGroup: Identifiable {
-        let id = UUID()
-        let text: String
-        let pixelRect: CGRect
-    }
-
-    /// 合併判斷用「撐大後」的框做碰撞測試(撐大倍率要跟 BubbleOverlayView 一致,
-    /// 不然合併決策跟實際畫出來的框對不上)。純函式,不摸 View 狀態。
-    private static func mergedOverlayGroups(from blocks: [TextBlock], imageSize: CGSize) -> [MergedOverlayGroup] {
-        guard imageSize.width > 0, imageSize.height > 0 else { return [] }
-
-        struct Item {
-            var text: String
-            var rect: CGRect       // 原始(未撐大)像素座標
-        }
-
-        func inflated(_ r: CGRect) -> CGRect {
-            let w = r.width * 1.5    // 對應 BubbleOverlayView.widthInflateFactor
-            let h = r.height * 1.0   // 對應 BubbleOverlayView.heightInflateFactor
-            return CGRect(x: r.midX - w / 2, y: r.midY - h / 2, width: w, height: h)
-        }
-
-        var items: [Item] = blocks.compactMap { block in
-            let text = block.translatedText ?? block.originalText
-            guard !text.isEmpty else { return nil }
-            let rect = CoordinateTransform.imagePixelRect(
-                forNormalizedVisionBox: block.normalizedBoundingBox, imagePixelSize: imageSize)
-            return Item(text: text, rect: rect)
-        }
-
-        // 重複掃描、合併任何一對撐大後會碰撞的框,直到沒有東西可合併為止。
-        var didMerge = true
-        while didMerge {
-            didMerge = false
-            outer: for i in items.indices {
-                for j in items.indices where j > i {
-                    guard inflated(items[i].rect).intersects(inflated(items[j].rect)) else { continue }
-                    let a = items[i], b = items[j]
-                    // 由上到下讀:pixel 座標 y 越小代表畫面越上面。
-                    let combinedText = a.rect.minY <= b.rect.minY
-                        ? "\(a.text)\n\(b.text)"
-                        : "\(b.text)\n\(a.text)"
-                    items[i] = Item(text: combinedText, rect: a.rect.union(b.rect))
-                    items.remove(at: j)
-                    didMerge = true
-                    break outer
-                }
-            }
-        }
-
-        return items.map { MergedOverlayGroup(text: $0.text, pixelRect: $0.rect) }
-    }
-
     /// 依語言代碼組出 Vision 看得懂的 recognitionLanguages 格式(BCP-47)
     private func visionRecognitionLanguage(for code: String) -> String {
         switch code {
@@ -189,7 +193,7 @@ struct ContentView: View {
     }
 
     /// Stage 0/1:驗證 Metal/MLX 能不能在 LiveContainer 環境下正常運作,
-    /// 不下載任何模型——先確認環境,通過才值得投入 Stage 2(真正接模型)。
+    /// 不下載任何模型——先確認環境,通過才值得投入接模型。
     private var mlxSmokeTestSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             Button("MLX 自我檢測") { smokeTestResult = MLXSmokeTest.run() }
@@ -202,48 +206,108 @@ struct ContentView: View {
         }
     }
 
-    /// 顯示 Vision 實際辨識出的原文,方便判斷「辨識錯」還是「翻譯錯」
+    /// 顯示裁圖縮圖 + Vision 辨識原文 + VLM 讀到的原文 + 譯文,方便判斷卡在
+    /// 「框抓錯」「裁歪/裁太緊」「VLM 讀錯」「翻錯」哪一步(文字引擎沒有裁圖/VLM
+    /// 讀字這兩欄,對應顯示空白)。
     private var debugList: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 4) {
+            LazyVStack(alignment: .leading, spacing: 8) {
                 ForEach(blocks) { block in
-                    Text("原文:\(block.originalText)　→　譯文:\(block.translatedText ?? "…")")
+                    HStack(alignment: .top, spacing: 8) {
+                        if let crop = cropPreviews[block.id] {
+                            Image(uiImage: crop)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 90, height: 44)
+                                .border(.gray)
+                        }
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Vision:\(block.visionText)")
+                            if let recognized = block.recognizedText {
+                                Text("VLM讀到:\(recognized)")
+                            }
+                            Text("譯文:\(block.translatedText ?? "…")")
+                        }
                         .font(.system(.caption2, design: .monospaced))
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(height: 160)
+        .frame(height: 220)
     }
 
     private func runPipeline() async {
-        guard let image else {
+        guard let rawImage = image else {
             status = "找不到測試圖片(Fixtures/sample-es.jpg 沒被打包進去?)"
             return
         }
-        imageSize = image.size
-        status = "OCR 辨識中…"
+        // 統一座標系:.up 方向 + 像素尺寸(裁圖需要精確像素,疊字用比例運算原本
+        // 用「點」也沒事,但兩邊統一用像素比較不容易踩到 @2x/@3x 的坑)。
+        let page = RegionCropper.normalizedUp(rawImage)
+        guard let cg = page.cgImage else {
+            status = "圖片沒有 cgImage"
+            return
+        }
+        let pixelWidth = cg.width
+        let pixelHeight = cg.height
+        imageSize = CGSize(width: pixelWidth, height: pixelHeight)
+        cropPreviews = [:]
+
+        status = "OCR 定位中…"
         do {
             let recognized = try await TextRecognizer.recognizeText(
-                in: image,
+                in: page,
                 recognitionLanguages: [visionRecognitionLanguage(for: sourceLanguage), "en-US"]
             )
-            blocks = recognized.map {
-                TextBlock(originalText: $0.text, translatedText: nil, normalizedBoundingBox: $0.normalizedBoundingBox)
-            }
-            status = "辨識到 \(blocks.count) 段文字,翻譯中…"
 
-            let translated = try await localEngine.translate(
-                blocks.map { $0.originalText },
-                from: sourceLanguage,
-                to: targetLanguage
-            )
-            for i in blocks.indices where i < translated.count {
-                blocks[i].translatedText = translated[i]
+            // 先合併同一對話框裡被 Vision 拆成多行的 bbox,再裁圖/翻譯——
+            // VLM 呼叫次數減半以上,而且能看到完整語句上下文(見 README)。
+            let regions = RegionMerger.merge(recognized, pixelWidth: pixelWidth, pixelHeight: pixelHeight)
+            blocks = regions.map {
+                TextBlock(visionText: $0.visionText, recognizedText: nil,
+                          translatedText: nil, pixelRect: $0.pixelRect)
+            }
+            status = "定位到 \(blocks.count) 個文字區塊,翻譯中…"
+
+            switch engineKind {
+            case .text:
+                try await runTextPipeline()
+            case .vision:
+                try await runVisionPipeline(page: page, pixelWidth: pixelWidth, pixelHeight: pixelHeight)
             }
             status = "完成"
         } catch {
             status = "失敗:\(error.localizedDescription)"
         }
+    }
+
+    /// 文字引擎路線:整批純文字丟給 TranslateGemma 翻,一次拿全部結果。
+    private func runTextPipeline() async throws {
+        let translated = try await localEngine.translate(
+            blocks.map { $0.visionText },
+            from: sourceLanguage,
+            to: targetLanguage
+        )
+        for i in blocks.indices where i < translated.count {
+            blocks[i].translatedText = translated[i]
+        }
+    }
+
+    /// 視覺引擎路線:逐塊裁圖丟給 VLM 讀字+翻譯,每完成一塊立刻更新畫面
+    /// (每塊約 2-4 秒,一次等全部做完會讓使用者盯著空白畫面很久)。
+    private func runVisionPipeline(page: UIImage, pixelWidth: Int, pixelHeight: Int) async throws {
+        for i in blocks.indices {
+            let cropRect = RegionCropper.padded(
+                blocks[i].pixelRect, pixelWidth: pixelWidth, pixelHeight: pixelHeight)
+            guard let crop = RegionCropper.crop(page, toPixelRect: cropRect) else { continue }
+            cropPreviews[blocks[i].id] = UIImage(cgImage: crop)
+
+            let result = try await vlmEngine.translateRegion(
+                crop, from: sourceLanguage, to: targetLanguage)
+            blocks[i].recognizedText = result.recognizedText
+            blocks[i].translatedText = result.translatedText
+        }
+        vlmEngine.finishPage()
     }
 }
