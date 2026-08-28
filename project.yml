@@ -1,4 +1,4 @@
-name: MangaTranslate
+name: ImgTranslate
 
 options:
   bundleIdPrefix: dev.cyril
@@ -30,13 +30,13 @@ settings:
     ENABLE_USER_SCRIPT_SANDBOXING: NO
 
 targets:
-  MangaTranslate:
+  ImgTranslate:
     type: application
     platform: iOS
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: dev.cyril.mangatranslate
-        PRODUCT_NAME: MangaTranslate
+        PRODUCT_BUNDLE_IDENTIFIER: dev.cyril.imgtranslate
+        PRODUCT_NAME: ImgTranslate
     sources:
       - path: Sources
       - path: Fixtures
@@ -46,7 +46,7 @@ targets:
     info:
       path: Support/Info.plist
       properties:
-        CFBundleDisplayName: MangaTranslate
+        CFBundleDisplayName: ImgTranslate
         UILaunchScreen: {}
         UIRequiredDeviceCapabilities:
           - arm64
@@ -54,10 +54,10 @@ targets:
           - UIInterfaceOrientationPortrait
 
 schemes:
-  MangaTranslate:
+  ImgTranslate:
     build:
       targets:
-        MangaTranslate: all
+        ImgTranslate: all
     run:
       config: Release
     archive:

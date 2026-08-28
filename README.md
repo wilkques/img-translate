@@ -1,4 +1,4 @@
-# MangaTranslate POC — OCR + 原地疊字翻譯
+# ImgTranslate POC — OCR + 原地疊字翻譯
 
 ## 這支 App 在驗什麼
 
@@ -13,14 +13,14 @@
 這份 repo 已經在本機 `git init` + commit 過,預設 branch 是 `master`(跟 `lc-memprobe` 一樣)。
 
 ```bash
-cd C:\works\projects\manga-translate
-git remote add origin https://github.com/<你的帳號>/manga-translate.git
+cd C:\works\projects\img-translate
+git remote add origin https://github.com/<你的帳號>/img-translate.git
 git push -u origin master
 ```
 
 ## 下載 artifact 與安裝
 
-跟 `lc-memprobe`完全一樣:Actions 分頁 → 最新成功的 run → 最下方 Artifacts → 下載 `MangaTranslate-ipa`(zip,裡面兩個 ipa)→ LiveContainer 匯入 `MangaTranslate-unsigned.ipa`,失敗就換 `MangaTranslate-adhoc.ipa`。
+跟 `lc-memprobe`完全一樣:Actions 分頁 → 最新成功的 run → 最下方 Artifacts → 下載 `ImgTranslate-ipa`(zip,裡面兩個 ipa)→ LiveContainer 匯入 `ImgTranslate-unsigned.ipa`,失敗就換 `ImgTranslate-adhoc.ipa`。
 
 ## 驗證步驟
 

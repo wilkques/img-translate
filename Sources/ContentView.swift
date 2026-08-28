@@ -51,7 +51,7 @@ struct ContentView: View {
                 .buttonStyle(.borderedProminent)
             }
             .padding()
-            .navigationTitle("MangaTranslate")
+            .navigationTitle("ImgTranslate")
             .task { await runPipeline() }
         }
     }

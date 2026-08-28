@@ -1,7 +1,7 @@
 import SwiftUI
 
 @main
-struct MangaTranslateApp: App {
+struct ImgTranslateApp: App {
     var body: some Scene {
         WindowGroup { ContentView() }
     }

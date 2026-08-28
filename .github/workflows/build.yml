@@ -12,8 +12,8 @@ jobs:
     timeout-minutes: 30
 
     env:
-      SCHEME: MangaTranslate
-      PROJECT: MangaTranslate.xcodeproj
+      SCHEME: ImgTranslate
+      PROJECT: ImgTranslate.xcodeproj
 
     steps:
       - uses: actions/checkout@v4
@@ -63,12 +63,12 @@ jobs:
           APP=$(find build/Build/Products -maxdepth 2 -name '*.app' -type d | head -n 1)
           echo "APP=$APP"
           test -n "$APP"
-          file "$APP/MangaTranslate" || true
-          lipo -info "$APP/MangaTranslate" || true
+          file "$APP/ImgTranslate" || true
+          lipo -info "$APP/ImgTranslate" || true
 
           rm -rf Payload && mkdir -p Payload
           cp -R "$APP" Payload/
-          zip -qry "MangaTranslate-unsigned.ipa" Payload
+          zip -qry "ImgTranslate-unsigned.ipa" Payload
 
           rm -rf Payload && mkdir -p Payload
           cp -R "$APP" Payload/
@@ -77,17 +77,17 @@ jobs:
           else
             echo "ad-hoc 簽名失敗,這顆與 unsigned 相同"
           fi
-          zip -qry "MangaTranslate-adhoc.ipa" Payload
+          zip -qry "ImgTranslate-adhoc.ipa" Payload
 
-          ls -lh MangaTranslate-*.ipa
-          unzip -l MangaTranslate-unsigned.ipa | head -30
+          ls -lh ImgTranslate-*.ipa
+          unzip -l ImgTranslate-unsigned.ipa | head -30
 
       - uses: actions/upload-artifact@v4
         with:
-          name: MangaTranslate-ipa
+          name: ImgTranslate-ipa
           path: |
-            MangaTranslate-unsigned.ipa
-            MangaTranslate-adhoc.ipa
+            ImgTranslate-unsigned.ipa
+            ImgTranslate-adhoc.ipa
           if-no-files-found: error
           retention-days: 30
 
