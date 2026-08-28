@@ -70,20 +70,23 @@ final class LocalLLMTranslationEngine: ObservableObject, TranslationEngine {
                 results.append(text)
                 continue
             }
-            // ⚠️ 實驗性:狀聲詞/吼叫聲(GRRRAAAGH 這種)實測會被翻成「怒吼」這種描述詞,
+            // ⚠️ 實驗性:狀聲詞/吼叫聲(GRRRAAAGH 這種)會被翻成「怒吼」這種描述詞,
             // 不是漫畫慣用的擬聲字轉寫。用簡單的「連續重複字母」偵測挑出這類文字,
-            // 在 <<<text>>> 內容前面加一句音譯指示。這是塞進 immersive-translate 範本
-            // 的純文字分隔格式裡,能不能被模型正確理解(而不是被當成內容一起翻)沒把握,
-            // 需要裝機驗證效果。
-            let body = Self.looksLikeOnomatopoeia(trimmed)
-                ? "(Onomatopoeia: transliterate the sound phonetically into \(targetName), do not translate the literal meaning.) \(trimmed)"
+            // 在 <<<text>>> 內容前面加一句音譯指示。第一版實測指示語本身會被模型當成
+            // 內容一起吐出來(例如輸出「(模擬聲音:...) 嘶嘶嘶」),所以(a)指示語改更
+            // 強硬要求「只輸出轉寫結果、不要輸出這句指示或任何說明」(b)輸出後再做一次
+            // 保險的前綴過濾(見 stripLeakedInstruction),雙重保險。
+            let isOnomatopoeia = Self.looksLikeOnomatopoeia(trimmed)
+            let body = isOnomatopoeia
+                ? "(This is a sound effect / battle cry, not a real word. Output ONLY the phonetic transliteration into \(targetName) — no explanation, no label, no parentheses, nothing else.) \(trimmed)"
                 : trimmed
             let prompt = "<<<source>>>\(sourceName)<<<target>>>\(targetName)<<<text>>>\(body)"
-            let translated = try await Self.generateOne(
+            let rawTranslated = try await Self.generateOne(
                 prompt,
                 container: container,
                 parameters: generateParameters
             )
+            let translated = isOnomatopoeia ? Self.stripLeakedInstruction(rawTranslated) : rawTranslated
             results.append(translated.isEmpty ? text : translated)
         }
 
@@ -213,6 +216,19 @@ final class LocalLLMTranslationEngine: ObservableObject, TranslationEngine {
             }
         }
         return false
+    }
+
+    /// 保險用:狀聲詞的音譯指示偶爾會被模型原樣複誦回來,格式通常是開頭一個
+    /// 中/英文括號包住的說明(「(模擬聲音:...)」/「(Note: ...)」),把這種開頭
+    /// 括號整段砍掉,只留後面真正的轉寫結果。抓不到括號就原樣回傳,不誤殺正常輸出。
+    private static func stripLeakedInstruction(_ text: String) -> String {
+        let opens: [Character] = ["(", "（"]
+        let closes: [Character] = [")", "）"]
+        guard let first = text.first, opens.contains(first) else { return text }
+        guard let closeIndex = text.firstIndex(where: { closes.contains($0) }) else { return text }
+        let remainder = text[text.index(after: closeIndex)...]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return remainder.isEmpty ? text : remainder
     }
 
     static func languageName(for code: String) throws -> String {
