@@ -59,7 +59,6 @@ targets:
       - path: Fixtures
     dependencies:
       - sdk: Vision.framework
-      - sdk: Translation.framework
       # 刻意不連 MLXHuggingFace(官方 macro 路線會多拉 vendored xgrammar C++ +
       # swift-syntax macro plugin,編譯時間會爆掉)。改連 swift-huggingface +
       # swift-transformers,自己手寫轉接層(HuggingFaceBridge.swift)。

@@ -8,17 +8,7 @@ struct ContentView: View {
     @State private var status = "準備中…"
     @State private var imageSize: CGSize = .zero
     @State private var smokeTestResult = ""
-    @StateObject private var appleEngine = AppleTranslationEngine()
     @StateObject private var localEngine = LocalLLMTranslationEngine()
-
-    enum EngineChoice: String, CaseIterable {
-        case apple = "系統翻譯(已知會卡住)"
-        case local = "本機模型(MLX)"
-    }
-
-    // Apple Translation 已確認在 LiveContainer 下會永遠卡住(debugLog 定位到
-    // session.translations(from:) 本身卡死),預設改選本機模型。
-    @State private var engineChoice: EngineChoice = .local
 
     private let image: UIImage? = {
         guard let path = Bundle.main.path(forResource: "sample-es", ofType: "jpg"),
@@ -29,10 +19,7 @@ struct ContentView: View {
     @State private var sourceLanguage = "es"
     @State private var targetLanguage = "zh-Hant-TW"
 
-    /// 這次先用固定清單(涵蓋 Apple Translation 常見支援語言),不即時查
-    /// `LanguageAvailability` API——那個 API 回傳的是裝置「大致支援」的語言,
-    /// 不代表某個特定語言對一定能翻,實際能不能翻由 runPipeline() 執行時
-    /// 的錯誤訊息反映出來(session.translations 丟出的 error 會顯示在狀態列)。
+    /// 固定清單,對應 `LocalLLMTranslationEngine.languageNameMap` 有映射的語言代碼。
     private let languageOptions: [(code: String, label: String)] = [
         ("es", "西班牙文"),
         ("en", "英文"),
@@ -49,7 +36,7 @@ struct ContentView: View {
             VStack(spacing: 12) {
                 languagePickers
 
-                enginePicker
+                localEngineStatusLine
 
                 GeometryReader { geo in
                     ZStack {
@@ -70,7 +57,6 @@ struct ContentView: View {
                             }
                         }
                     }
-                    .background(TranslationBridge(engine: appleEngine))
                 }
 
                 Text(status).font(.caption).foregroundStyle(.secondary)
@@ -83,27 +69,10 @@ struct ContentView: View {
                 .buttonStyle(.borderedProminent)
 
                 mlxSmokeTestSection
-
-                appleTranslationDebugSection
             }
             .padding()
             .navigationTitle("ImgTranslate")
-            .task(id: "\(sourceLanguage)|\(targetLanguage)|\(engineChoice.rawValue)") { await runPipeline() }
-        }
-    }
-
-    private var enginePicker: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Picker("翻譯引擎", selection: $engineChoice) {
-                ForEach(EngineChoice.allCases, id: \.self) { choice in
-                    Text(choice.rawValue).tag(choice)
-                }
-            }
-            .pickerStyle(.segmented)
-
-            if engineChoice == .local {
-                localEngineStatusLine
-            }
+            .task(id: "\(sourceLanguage)|\(targetLanguage)") { await runPipeline() }
         }
     }
 
@@ -177,20 +146,6 @@ struct ContentView: View {
         }
     }
 
-    /// 診斷用:定位 Apple Translation 卡住的位置是 SwiftUI 層(.translationTask 沒觸發)
-    /// 還是系統 API 本身(session.translations(from:) 卡住)。
-    private var appleTranslationDebugSection: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Apple Translation 診斷 log").font(.caption).bold()
-            ForEach(Array(appleEngine.debugLog.enumerated()), id: \.offset) { _, line in
-                Text(line)
-                    .font(.system(.caption2, design: .monospaced))
-                    .textSelection(.enabled)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
     /// 顯示 Vision 實際辨識出的原文,方便判斷「辨識錯」還是「翻譯錯」
     private var debugList: some View {
         ScrollView {
@@ -222,21 +177,11 @@ struct ContentView: View {
             }
             status = "辨識到 \(blocks.count) 段文字,翻譯中…"
 
-            let translated: [String]
-            switch engineChoice {
-            case .apple:
-                translated = try await appleEngine.translate(
-                    blocks.map { $0.originalText },
-                    from: sourceLanguage,
-                    to: targetLanguage
-                )
-            case .local:
-                translated = try await localEngine.translate(
-                    blocks.map { $0.originalText },
-                    from: sourceLanguage,
-                    to: targetLanguage
-                )
-            }
+            let translated = try await localEngine.translate(
+                blocks.map { $0.originalText },
+                from: sourceLanguage,
+                to: targetLanguage
+            )
             for i in blocks.indices where i < translated.count {
                 blocks[i].translatedText = translated[i]
             }
