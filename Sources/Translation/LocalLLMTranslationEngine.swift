@@ -209,9 +209,15 @@ final class LocalLLMTranslationEngine: ObservableObject, TranslationEngine {
         "zh-CN": "Chinese (Simplified)",
     ]
 
-    /// 語言無關的簡單偵測法:文字裡有沒有連續 3 個以上相同字母(不分大小寫),
+    /// 判斷式(a)語言無關:文字裡有沒有連續 3 個以上相同字母(不分大小寫),
     /// 例如 GRRRAAAGH、AAAAH、ZZZZ——漫畫狀聲詞/吼叫聲常見這種寫法,一般句子幾乎不會。
+    /// (b)西班牙文專屬:含倒驚嘆號「¡」——這是很強的「喊叫/驚呼」訊號,不需要
+    /// 依賴字母重複,OCR 把重複字母認錯(例如 UWA→LIWA)時這個判準還能撐住。
+    /// ⚠️ 已知代價:真的用「¡...!」喊出來的一般單字(不是狀聲詞)也會被誤判,
+    /// 這次測試資料沒有這種情況,先接受這個取捨。
     private static func looksLikeOnomatopoeia(_ text: String) -> Bool {
+        if text.contains("¡") { return true }
+
         let letters = Array(text.uppercased().filter { $0.isLetter })
         guard letters.count >= 3 else { return false }
         var runLength = 1

@@ -11,11 +11,11 @@ struct BubbleOverlayView: View {
 
     /// Vision 抓的原文 bbox 通常只框住文字墨跡本身(比整顆手繪對話框小很多),
     /// 照原尺寸畫遮色框會讓字擠成一團、被 minimumScaleFactor 壓到很小,所以往外
-    /// 撐一點空間給譯文喘息,中心點不變。寬高撐大的比例不對稱:同一個對話框裡
-    /// 常常有相鄰兩行字被 Vision 拆成兩塊各自的 bbox,高度撐太多會讓上下兩塊
-    /// 疊在一起(裝機實測過),所以高度只小幅撐大、寬度撐比較多。
+    /// 撐一點空間給譯文喘息,中心點不變。**只撐寬度,高度完全不撐**:同一個對話框
+    /// 裡常常有相鄰兩行字被 Vision 拆成兩塊各自的 bbox、彼此間距本來就很近,
+    /// 裝機實測過連 10% 的高度撐大都會讓上下兩塊疊在一起,乾脆不動高度。
     private static let widthInflateFactor: CGFloat = 1.5
-    private static let heightInflateFactor: CGFloat = 1.1
+    private static let heightInflateFactor: CGFloat = 1.0
 
     private var inflatedSize: CGSize {
         CGSize(width: max(rect.width, 1) * Self.widthInflateFactor,
