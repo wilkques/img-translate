@@ -9,25 +9,35 @@ struct BubbleOverlayView: View {
     var maskColor: Color = .white.opacity(0.96)
     var textColor: Color = .black
 
+    /// Vision 抓的原文 bbox 通常只框住文字墨跡本身(比整顆手繪對話框小很多),
+    /// 照原尺寸畫遮色框會讓字擠成一團、被 minimumScaleFactor 壓到很小。
+    /// 往外撐一點空間給譯文喘息,中心點不變。
+    private static let inflateFactor: CGFloat = 1.35
+
+    private var inflatedSize: CGSize {
+        CGSize(width: max(rect.width, 1) * Self.inflateFactor,
+               height: max(rect.height, 1) * Self.inflateFactor)
+    }
+
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 4)
                 .fill(maskColor)
             Text(text)
-                .font(.system(size: startingFontSize, weight: .bold, design: .rounded))
+                .font(.system(size: startingFontSize, weight: .heavy, design: .default))
                 .foregroundColor(textColor)
-                .minimumScaleFactor(0.3)
+                .minimumScaleFactor(0.5)
                 .lineLimit(3)
                 .multilineTextAlignment(.center)
                 .padding(4)
         }
-        .frame(width: max(rect.width, 1), height: max(rect.height, 1))
+        .frame(width: inflatedSize.width, height: inflatedSize.height)
         .position(x: rect.midX, y: rect.midY)
         .allowsHitTesting(false)
     }
 
-    /// 依框高抓一個起始字級,實際顯示會被 minimumScaleFactor 再往下縮到不溢出
+    /// 依撐大後的框高抓一個起始字級,實際顯示會被 minimumScaleFactor 再往下縮到不溢出
     private var startingFontSize: CGFloat {
-        max(10, rect.height * 0.45)
+        max(12, inflatedSize.height * 0.6)
     }
 }

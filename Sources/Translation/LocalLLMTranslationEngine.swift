@@ -70,7 +70,15 @@ final class LocalLLMTranslationEngine: ObservableObject, TranslationEngine {
                 results.append(text)
                 continue
             }
-            let prompt = "<<<source>>>\(sourceName)<<<target>>>\(targetName)<<<text>>>\(trimmed)"
+            // ⚠️ 實驗性:狀聲詞/吼叫聲(GRRRAAAGH 這種)實測會被翻成「怒吼」這種描述詞,
+            // 不是漫畫慣用的擬聲字轉寫。用簡單的「連續重複字母」偵測挑出這類文字,
+            // 在 <<<text>>> 內容前面加一句音譯指示。這是塞進 immersive-translate 範本
+            // 的純文字分隔格式裡,能不能被模型正確理解(而不是被當成內容一起翻)沒把握,
+            // 需要裝機驗證效果。
+            let body = Self.looksLikeOnomatopoeia(trimmed)
+                ? "(Onomatopoeia: transliterate the sound phonetically into \(targetName), do not translate the literal meaning.) \(trimmed)"
+                : trimmed
+            let prompt = "<<<source>>>\(sourceName)<<<target>>>\(targetName)<<<text>>>\(body)"
             let translated = try await Self.generateOne(
                 prompt,
                 container: container,
@@ -189,6 +197,23 @@ final class LocalLLMTranslationEngine: ObservableObject, TranslationEngine {
         "zh-TW": "Chinese (Traditional)",
         "zh-CN": "Chinese (Simplified)",
     ]
+
+    /// 語言無關的簡單偵測法:文字裡有沒有連續 3 個以上相同字母(不分大小寫),
+    /// 例如 GRRRAAAGH、AAAAH、ZZZZ——漫畫狀聲詞/吼叫聲常見這種寫法,一般句子幾乎不會。
+    private static func looksLikeOnomatopoeia(_ text: String) -> Bool {
+        let letters = Array(text.uppercased().filter { $0.isLetter })
+        guard letters.count >= 3 else { return false }
+        var runLength = 1
+        for i in 1..<letters.count {
+            if letters[i] == letters[i - 1] {
+                runLength += 1
+                if runLength >= 3 { return true }
+            } else {
+                runLength = 1
+            }
+        }
+        return false
+    }
 
     static func languageName(for code: String) throws -> String {
         if let mapped = languageNameMap[code] { return mapped }
