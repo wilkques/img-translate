@@ -44,13 +44,17 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     private var container: ModelContainer?
     private var loadTask: Task<ModelContainer, Error>?
 
-    /// ⚠️ 裝機實測發現:temperature 0(純貪婪解碼)在難讀的裁圖(扭曲字體、裁太緊)
-    /// 上會卡進「同一個字元一直重複」的生成迴圈(例如整段輸出變成一長串 "iiiii..."),
-    /// 燒光 maxTokens 也生不出正常的 ORIGINAL/TRANSLATION 格式。改用一個很小的非零
-    /// 溫度降低卡迴圈機率,翻譯仍然接近穩定(不是 0 但很低,不追求創意)。
-    /// maxTokens 從 128 降到 80:一樣的迴圈萬一還是發生,少燒一點時間就失敗。
+    /// ⚠️ 裝機實測歷程:
+    /// 1. temperature 0(純貪婪解碼)在難讀的裁圖上會卡進「同一個字元一直重複」的
+    ///    生成迴圈(例如整段輸出變成一長串 "iiiii...")。改用一個很小的非零溫度
+    ///    降低卡迴圈機率,同時 `parse()` 加了退化輸出偵測當保險——裝機驗證這道
+    ///    偵測有效,抓到重複迴圈會顯示明確的失敗訊息而不是垃圾文字。
+    /// 2. 但把 maxTokens 從 128 砍到 80(想讓迴圈早點失敗)砍過頭了:合併過多行的
+    ///    對話框,模型光複誦完 Step 1 的原文就可能吃掉大半額度,還沒寫到
+    ///    Step 2 翻譯就被截斷(不是字元重複,退化偵測抓不到這種失敗模式)。
+    ///    既然退化偵測已經頂住了真正的迴圈,maxTokens 拉回來給多行框多一點空間。
     private let generateParameters = GenerateParameters(
-        maxTokens: 80,
+        maxTokens: 150,
         temperature: 0.2
     )
 
