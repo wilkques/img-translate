@@ -1,3 +1,4 @@
+import Foundation
 import CoreGraphics
 
 /// 合併後的「一顆對話框」。座標統一用圖片像素、原點左上——裁圖(`CGImage.cropping`)
