@@ -71,6 +71,8 @@ struct ContentView: View {
                 .buttonStyle(.borderedProminent)
 
                 mlxSmokeTestSection
+
+                appleTranslationDebugSection
             }
             .padding()
             .navigationTitle("ImgTranslate")
@@ -123,6 +125,20 @@ struct ContentView: View {
                     .textSelection(.enabled)
             }
         }
+    }
+
+    /// 診斷用:定位 Apple Translation 卡住的位置是 SwiftUI 層(.translationTask 沒觸發)
+    /// 還是系統 API 本身(session.translations(from:) 卡住)。
+    private var appleTranslationDebugSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Apple Translation 診斷 log").font(.caption).bold()
+            ForEach(Array(appleEngine.debugLog.enumerated()), id: \.offset) { _, line in
+                Text(line)
+                    .font(.system(.caption2, design: .monospaced))
+                    .textSelection(.enabled)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// 顯示 Vision 實際辨識出的原文,方便判斷「辨識錯」還是「翻譯錯」

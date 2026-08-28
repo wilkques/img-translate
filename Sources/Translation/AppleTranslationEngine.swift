@@ -20,26 +20,43 @@ final class AppleTranslationEngine: ObservableObject, TranslationEngine {
 
     @Published var pendingRequest: PendingRequest?
 
+    /// 診斷用:定位卡點在 SwiftUI 層(.translationTask 沒觸發)還是系統 API 本身。
+    @Published private(set) var debugLog: [String] = []
+
+    private func log(_ line: String) {
+        let stamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+        debugLog.append("[\(stamp)] \(line)")
+    }
+
     func translate(_ texts: [String], from source: String, to target: String) async throws -> [String] {
-        try await withCheckedThrowingContinuation { continuation in
+        log("translate() 被呼叫,\(texts.count) 段文字,\(source)→\(target)")
+        return try await withCheckedThrowingContinuation { continuation in
             self.pendingRequest = PendingRequest(texts: texts, source: source, target: target, continuation: continuation)
+            log("pendingRequest 已設定,等待 .translationTask 觸發…")
         }
     }
 
     func resolve(with session: TranslationSession) async {
-        guard let request = pendingRequest else { return }
+        log("resolve(with:) 被呼叫 — .translationTask 確定有觸發")
+        guard let request = pendingRequest else {
+            log("resolve(with:) 被呼叫,但 pendingRequest 是 nil(不應該發生)")
+            return
+        }
         pendingRequest = nil
         do {
             let requests = request.texts.enumerated().map { index, text in
                 TranslationSession.Request(sourceText: text, clientIdentifier: "\(index)")
             }
+            log("呼叫 session.translations(from:) 前")
             let responses = try await session.translations(from: requests)
+            log("session.translations(from:) 回應成功,\(responses.count) 筆")
             // 官方文件說回傳順序會跟輸入一致,這裡用 clientIdentifier 再保險排序一次
             let ordered = responses.sorted {
                 (Int($0.clientIdentifier ?? "0") ?? 0) < (Int($1.clientIdentifier ?? "0") ?? 0)
             }
             request.continuation.resume(returning: ordered.map { $0.targetText })
         } catch {
+            log("session.translations(from:) 拋錯:\(error.localizedDescription)")
             request.continuation.resume(throwing: error)
         }
     }
