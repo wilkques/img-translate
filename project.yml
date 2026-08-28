@@ -7,13 +7,20 @@ options:
   createIntermediateGroups: true
   generateEmptyDirectories: false
 
+packages:
+  mlx-swift-lm:
+    url: https://github.com/ml-explore/mlx-swift-lm
+    exactVersion: 3.31.4
+  # 明確釘住:mlx-swift 0.31.5+ 的 Package.swift 要求 swift-tools-version 6.3,
+  # runner 的 Swift 版本能不能滿足未知,0.31.4 是 tools-version 5.12,相容性最好。
+  mlx-swift:
+    url: https://github.com/ml-explore/mlx-swift
+    exactVersion: 0.31.4
+
 settings:
   base:
     MARKETING_VERSION: "1.0"
     CURRENT_PROJECT_VERSION: "1"
-    # 明確鎖 Swift 5 語言模式:Xcode 26 預設會把沒宣告的專案往 Swift 6
-    # strict concurrency 推,會讓這份 Swift 5 風格的程式碼變成編譯錯誤。
-    SWIFT_VERSION: "5.0"
     TARGETED_DEVICE_FAMILY: "1,2"
     # LiveContainer 官方說 arm64e 未測試、建議 arm64
     ARCHS: arm64
@@ -35,6 +42,10 @@ targets:
     platform: iOS
     settings:
       base:
+        # SWIFT_VERSION 特意放在 target 層級(不是 project 層級 settings.base):
+        # mlx-swift-lm 的 manifest 是 tools 6.1、mlx-swift 是 5.12,放在 project
+        # 層級有機會把 SPM package target 也強制降成 Swift 5,產生難懂的編譯錯誤。
+        SWIFT_VERSION: "5.0"
         PRODUCT_BUNDLE_IDENTIFIER: dev.cyril.imgtranslate
         PRODUCT_NAME: ImgTranslate
     sources:
@@ -43,6 +54,13 @@ targets:
     dependencies:
       - sdk: Vision.framework
       - sdk: Translation.framework
+      # Stage 0/1 只驗證 Metal 能不能在 LiveContainer 環境下正常運作,
+      # 刻意不連 MLXHuggingFace(macro 路線會多拉 vendored xgrammar C++ +
+      # swift-syntax macro plugin,編譯時間會爆掉),下載/tokenizer 是 Stage 2 才要的。
+      - package: mlx-swift-lm
+        products: [MLXLLM, MLXLMCommon]
+      - package: mlx-swift
+        product: MLX
     info:
       path: Support/Info.plist
       properties:

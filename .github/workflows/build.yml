@@ -9,7 +9,9 @@ jobs:
   build:
     # 2026-08 現況:macos-latest = macOS 26,預設 Xcode 26.6。
     runs-on: macos-latest
-    timeout-minutes: 30
+    # mlx-swift 是整包 vendored C++ 核心 + 上百個 Metal shader,clean build
+    # 估計 20-40 分鐘,30 分鐘的舊 timeout 大機率不夠。
+    timeout-minutes: 90
 
     env:
       SCHEME: ImgTranslate
@@ -35,6 +37,27 @@ jobs:
       - name: 產生 Xcode 專案
         run: xcodegen generate --spec project.yml
 
+      - name: 解析 SPM 依賴
+        run: |
+          set -euo pipefail
+          xcodebuild -resolvePackageDependencies \
+            -project "$PROJECT" -scheme "$SCHEME" \
+            -clonedSourcePackagesDirPath SourcePackages
+          cat SourcePackages/workspace-state.json | head -60 || true
+
+      - name: 快取 SPM 套件
+        uses: actions/cache@v4
+        with:
+          path: SourcePackages
+          key: spm-${{ hashFiles('project.yml') }}
+
+      - name: 快取 DerivedData
+        uses: actions/cache@v4
+        with:
+          path: build
+          key: dd-${{ hashFiles('project.yml') }}-${{ github.sha }}
+          restore-keys: dd-${{ hashFiles('project.yml') }}-
+
       - name: 診斷用 build settings
         run: |
           xcodebuild -project "$PROJECT" -scheme "$SCHEME" \
@@ -50,12 +73,13 @@ jobs:
             -configuration Release \
             -sdk iphoneos \
             -derivedDataPath build \
+            -clonedSourcePackagesDirPath SourcePackages \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_ENTITLEMENTS="" \
             ENABLE_BITCODE=NO \
-            clean build
+            build
 
       - name: 打包 IPA(同時產 unsigned 與 ad-hoc 兩顆)
         run: |
@@ -81,6 +105,14 @@ jobs:
 
           ls -lh ImgTranslate-*.ipa
           unzip -l ImgTranslate-unsigned.ipa | head -30
+
+      - name: 驗證 MLX metallib 有被打包
+        run: |
+          set -euo pipefail
+          unzip -l ImgTranslate-unsigned.ipa | grep -i "metallib\|Cmlx" || {
+            echo "❌ 找不到 mlx-swift_Cmlx.bundle / default.metallib,MLX 在裝置上一定會爆"
+            exit 1
+          }
 
       - uses: actions/upload-artifact@v4
         with:

@@ -43,4 +43,20 @@ git push -u origin master
 
 ## 下一步(這次不做)
 
-驗證通過後才進行:WKWebView 即時擷取網頁圖片(取代這次寫死的固定測試圖)、串接 MLX Swift 本機模型(`Sources/Translation/LocalLLMTranslationEngine.swift` 已留好介面卡槽)、自動換頁偵測。
+WKWebView 即時擷取網頁圖片(取代這次寫死的固定測試圖)、自動換頁偵測。
+
+## MLX 本機模型探針(Stage 0/1)
+
+這次新增 `MLXLLM`/`MLXLMCommon`/`MLX` 三個 SPM 依賴,但**還沒真的接模型**——先驗證 Metal GPU 運算能不能在 LiveContainer 側載環境下正常運作,這是接下來要跑 Gemma/Qwen 本機翻譯模型的前提,而且完全沒有前例可查(社群對另一支 App「Provenance」的說法是 LiveContainer 限制 Metal GPU 存取,但那主要跟 JIT 有關,不確定適不適用於 MLX 這種用預編譯 metallib、不需要 runtime 編 shader 的用法)。
+
+**這次編譯時間會明顯變長**(mlx-swift 的 C++ 核心 + 上百個 Metal shader,估計 20–40 分鐘,workflow timeout 已從 30 分鐘調到 90 分鐘),第一次 push 請有心理準備等久一點,失敗的話看 Actions log 的「解析 SPM 依賴」或「編譯」哪一步出錯。
+
+**測試方式**:App 畫面最下方多一顆「MLX 自我檢測」按鈕,不用等 OCR/翻譯跑完就能按。按下去會顯示三種結果之一:
+
+| 結果 | 意義 | 下一步 |
+|---|---|---|
+| `❌ MTLCreateSystemDefaultDevice() 回 nil` | LiveContainer 真的擋掉 Metal | 這條路不可行,本機模型翻譯要退回雲端 API 或换正式簽署的 App |
+| 拿到 Metal device,但按下去閃退 | metallib 打包或定位問題 | 回報給 Jarvis,查 CI log 的「驗證 MLX metallib 有被打包」那步有沒有過 |
+| 顯示 `✅ Metal device: ...` + `✅ MLX GPU 運算 OK(期望 20,實得 20)` | 環境沒問題 | 可以進 Stage 2:真正下載 TranslateGemma 模型接上翻譯 |
+
+把按鈕顯示的完整文字貼回來給 Jarvis 判讀。

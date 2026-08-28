@@ -7,6 +7,7 @@ struct ContentView: View {
     @State private var showTranslated = true
     @State private var status = "準備中…"
     @State private var imageSize: CGSize = .zero
+    @State private var smokeTestResult = ""
     @StateObject private var appleEngine = AppleTranslationEngine()
 
     private let image: UIImage? = {
@@ -68,6 +69,8 @@ struct ContentView: View {
                     showTranslated.toggle()
                 }
                 .buttonStyle(.borderedProminent)
+
+                mlxSmokeTestSection
             }
             .padding()
             .navigationTitle("ImgTranslate")
@@ -105,6 +108,20 @@ struct ContentView: View {
         case "zh-Hans": return "zh-Hans"
         case "zh-Hant-TW": return "zh-Hant"
         default: return code
+        }
+    }
+
+    /// Stage 0/1:驗證 Metal/MLX 能不能在 LiveContainer 環境下正常運作,
+    /// 不下載任何模型——先確認環境,通過才值得投入 Stage 2(真正接模型)。
+    private var mlxSmokeTestSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button("MLX 自我檢測") { smokeTestResult = MLXSmokeTest.run() }
+                .buttonStyle(.bordered)
+            if !smokeTestResult.isEmpty {
+                Text(smokeTestResult)
+                    .font(.system(.caption2, design: .monospaced))
+                    .textSelection(.enabled)
+            }
         }
     }
 
