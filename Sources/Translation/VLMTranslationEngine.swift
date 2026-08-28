@@ -191,7 +191,7 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
 
     /// 同一個非空白字元連續出現超過這個次數,判定生成卡進重複迴圈了。
     /// 一般正常語句(包含中文疊字、西班牙文重複字母的狀聲詞)不會連續重複這麼多次。
-    private static func isDegenerateOutput(_ raw: String, threshold: Int = 12) -> Bool {
+    private nonisolated static func isDegenerateOutput(_ raw: String, threshold: Int = 12) -> Bool {
         var runLength = 0
         var previous: Character?
         for ch in raw where !ch.isWhitespace {
