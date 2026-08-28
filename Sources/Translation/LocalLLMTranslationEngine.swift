@@ -5,13 +5,17 @@ import MLXLMCommon
 
 /// MLX Swift 本機模型翻譯引擎。
 ///
-/// 模型:mlx-community/translategemma-4b-it-4bit(2.22GB,Google TranslateGemma 翻譯專用微調)
+/// 模型:mlx-community/translategemma-4b-it-4bit_immersive-translate(TranslateGemma 4B 翻譯
+/// 專用微調,重新包過 chat template 給一般推理引擎用)。
 ///
-/// 為什麼不用自己寫「只輸出翻譯、不要解釋」的 system prompt:
-/// TranslateGemma 的 chat template(隨模型 repo 附的 chat_template.jinja)已經內建這段指示,
-/// 會讀 `UserInput.additionalContext` 裡的 source_lang_code/target_lang_code 塞進模板渲染出
-/// 完整的翻譯指示。`HuggingFaceTokenizerBridge.applyChatTemplate` 會把 additionalContext
-/// 原封不動轉給 swift-transformers 的 tokenizer,不需要模型專屬的訊息產生器。
+/// ⚠️ 這裡有個踩過的坑:TranslateGemma **官方**的 chat template 要求 `content` 是結構化 list
+/// (`[{type, source_lang_code, target_lang_code, text}]`),不是純字串——用
+/// `UserInput.additionalContext` 塞語言代碼進去會讓 Jinja 渲染直接報錯
+/// (`Jinja.TemplateException`),因為官方模板根本不吃這種格式。
+/// `_immersive-translate` 這個變體版本改成純文字分隔符號格式:
+/// `<<<source>>>{語言全名}<<<target>>>{語言全名}<<<text>>>{原文}`,當一般字串訊息送即可,
+/// 不需要 additionalContext、不需要結構化 content——這正好對得上 mlx-swift-lm 的
+/// `UserInput(chat:)` 這種簡單 API。**注意語言要用完整英文名稱("English"/"French"),不是代碼。**
 @MainActor
 final class LocalLLMTranslationEngine: ObservableObject, TranslationEngine {
 
@@ -32,7 +36,8 @@ final class LocalLLMTranslationEngine: ObservableObject, TranslationEngine {
     /// mlx-swift-lm 的 LLMRegistry 沒有內建 TranslateGemma 的 preset,手動建
     /// ModelConfiguration 指向 HF repo——套件的通用 gemma3 型別處理器就能載入,
     /// 不需要 registry 裡有現成項目。
-    private static let configuration = ModelConfiguration(id: "mlx-community/translategemma-4b-it-4bit")
+    private static let configuration = ModelConfiguration(
+        id: "mlx-community/translategemma-4b-it-4bit_immersive-translate")
 
     private var container: ModelContainer?
     private var loadTask: Task<ModelContainer, Error>?
@@ -49,8 +54,8 @@ final class LocalLLMTranslationEngine: ObservableObject, TranslationEngine {
     func translate(_ texts: [String], from source: String, to target: String) async throws -> [String] {
         guard !texts.isEmpty else { return [] }
 
-        let sourceCode = try Self.templateLanguageCode(for: source)
-        let targetCode = try Self.templateLanguageCode(for: target)
+        let sourceName = try Self.languageName(for: source)
+        let targetName = try Self.languageName(for: target)
 
         let container = try await ensureLoaded()
 
@@ -65,11 +70,10 @@ final class LocalLLMTranslationEngine: ObservableObject, TranslationEngine {
                 results.append(text)
                 continue
             }
+            let prompt = "<<<source>>>\(sourceName)<<<target>>>\(targetName)<<<text>>>\(trimmed)"
             let translated = try await Self.generateOne(
-                trimmed,
+                prompt,
                 container: container,
-                source: sourceCode,
-                target: targetCode,
                 parameters: generateParameters
             )
             results.append(translated.isEmpty ? text : translated)
@@ -84,19 +88,13 @@ final class LocalLLMTranslationEngine: ObservableObject, TranslationEngine {
     // MARK: - 生成
 
     private nonisolated static func generateOne(
-        _ text: String,
+        _ prompt: String,
         container: ModelContainer,
-        source: String,
-        target: String,
         parameters: GenerateParameters
     ) async throws -> String {
-        let userInput = UserInput(
-            chat: [.user(text)],
-            additionalContext: [
-                "source_lang_code": source,
-                "target_lang_code": target,
-            ]
-        )
+        // 純字串訊息,語言資訊已經用 <<<source>>>/<<<target>>>/<<<text>>> 分隔符號
+        // 包在 prompt 裡了(見 translate() 組字串那行),不需要 additionalContext。
+        let userInput = UserInput(chat: [.user(prompt)])
 
         let lmInput = try await container.prepare(input: userInput)
         let stream = try await container.generate(input: lmInput, parameters: parameters)
@@ -174,28 +172,29 @@ final class LocalLLMTranslationEngine: ObservableObject, TranslationEngine {
 
     // MARK: - 語言代碼
 
-    /// TranslateGemma 的 chat template 內建一張語言表,查不到的代碼會讓 Jinja 渲染爆掉。
-    /// 已知有 en/es/ja/ko/fr/de/zh-Hans/zh-Hant,**沒有 zh-Hant-TW**
-    /// (ContentView 目前用的就是這個),所以必須映射。
-    private static let codeMap: [String: String] = [
-        "en": "en",
-        "es": "es",
-        "ja": "ja",
-        "ko": "ko",
-        "fr": "fr",
-        "de": "de",
-        "zh-Hans": "zh-Hans",
-        "zh-Hant": "zh-Hant",
-        "zh-Hant-TW": "zh-Hant",
-        "zh-TW": "zh-Hant",
-        "zh-CN": "zh-Hans",
+    /// `<<<source>>>`/`<<<target>>>` 這個分隔符號格式要的是**完整英文語言名稱**
+    /// (官方範例用 "English"/"French"),不是 BCP-47 代碼——這點跟原本官方結構化
+    /// content 格式(吃 `source_lang_code` 這種代碼)不一樣,容易搞混。
+    /// ContentView 語言選單用的代碼對應到這裡。
+    private static let languageNameMap: [String: String] = [
+        "en": "English",
+        "es": "Spanish",
+        "ja": "Japanese",
+        "ko": "Korean",
+        "fr": "French",
+        "de": "German",
+        "zh-Hans": "Chinese (Simplified)",
+        "zh-Hant": "Chinese (Traditional)",
+        "zh-Hant-TW": "Chinese (Traditional)",
+        "zh-TW": "Chinese (Traditional)",
+        "zh-CN": "Chinese (Simplified)",
     ]
 
-    static func templateLanguageCode(for code: String) throws -> String {
-        if let mapped = codeMap[code] { return mapped }
+    static func languageName(for code: String) throws -> String {
+        if let mapped = languageNameMap[code] { return mapped }
         // 退一步:砍掉區域子標籤再試一次(例如 "pt-BR" -> "pt")
         if let base = code.split(separator: "-").first.map(String.init),
-           let mapped = codeMap[base] {
+           let mapped = languageNameMap[base] {
             return mapped
         }
         throw LocalLLMError.unsupportedLanguage(code)

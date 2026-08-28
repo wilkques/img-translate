@@ -52,7 +52,9 @@ WKWebView 即時擷取網頁圖片(取代這次寫死的固定測試圖)、自�
 
 ## MLX 本機模型翻譯(Stage 2)
 
-真正接上模型:`mlx-community/translategemma-4b-it-4bit`(2.22GB,Google TranslateGemma 翻譯專用微調版)。App 畫面上方新增「翻譯引擎」切換(系統翻譯 / 本機模型),**預設選本機模型**。
+真正接上模型:`mlx-community/translategemma-4b-it-4bit_immersive-translate`(TranslateGemma 4B 翻譯專用微調,重新包過 chat template 給一般推理引擎用)。App 畫面上方新增「翻譯引擎」切換(系統翻譯 / 本機模型),**預設選本機模型**。
+
+⚠️ **中途踩過一個坑**:TranslateGemma 官方 chat template 要求結構化 content 格式,不吃我們原本用的 `additionalContext` 塞法,實測會直接 `Jinja.TemplateException`。已改用 `_immersive-translate` 這個變體版本,語言資訊改用純文字分隔符號包在 prompt 裡送(`<<<source>>>English<<<target>>>Chinese (Traditional)<<<text>>>原文`),不再需要結構化 content。
 
 **首次使用流程**:
 1. 選「本機模型(MLX)」引擎(預設就是)
@@ -70,5 +72,5 @@ WKWebView 即時擷取網頁圖片(取代這次寫死的固定測試圖)、自�
 
 **已知的技術細節**:
 - 模型下載到 LiveContainer 的 App 專屬 container,重新裝新版 ipa **不會**清掉已下載的模型(除非在 LiveContainer 對這個 App 執行 Delete Data/Remove Container),之後改程式碼重新 push 不用每次重下 2.2GB
-- 語言選單裡的 `zh-Hant-TW` 已經在程式碼裡映射成模型認得的 `zh-Hant`,其他語言選項也都有映射,理論上都能用
+- 語言選單的代碼(如 `zh-Hant-TW`)已經在程式碼裡映射成模板要的完整英文語言名稱(如 "Chinese (Traditional)"),其他語言選項也都有映射,理論上都能用
 - 如果切到「系統翻譯」引擎,行為跟之前一樣會卡住,只是拿來當對照組用
