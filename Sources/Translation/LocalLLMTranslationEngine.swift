@@ -70,23 +70,32 @@ final class LocalLLMTranslationEngine: ObservableObject, TranslationEngine {
                 results.append(text)
                 continue
             }
-            // ⚠️ 實驗性:狀聲詞/吼叫聲(GRRRAAAGH 這種)會被翻成「怒吼」這種描述詞,
-            // 不是漫畫慣用的擬聲字轉寫。用簡單的「連續重複字母」偵測挑出這類文字,
-            // 在 <<<text>>> 內容前面加一句音譯指示。第一版實測指示語本身會被模型當成
-            // 內容一起吐出來(例如輸出「(模擬聲音:...) 嘶嘶嘶」),所以(a)指示語改更
-            // 強硬要求「只輸出轉寫結果、不要輸出這句指示或任何說明」(b)輸出後再做一次
-            // 保險的前綴過濾(見 stripLeakedInstruction),雙重保險。
+            // ⚠️ 實驗性提示,兩種都可能被模型當成內容一起吐出來,所以一律過
+            // stripLeakedInstruction() 做保險過濾(見下方函式)。
+            //
+            // (1) 狀聲詞/吼叫聲(GRRRAAAGH 這種)會被翻成「怒吼」這種描述詞,不是
+            //     漫畫慣用的擬聲字轉寫,用「連續重複字母」偵測挑出來加音譯指示。
+            // (2) 一般對話預設翻得偏書面/正式(「你很吵」),想要更貼近口語漫畫台詞
+            //     的語氣(「你吵死了」這種),加一句語氣指示——TranslateGemma 是翻譯
+            //     專用微調模型,語氣調整的服從度沒把握,需要裝機驗證有沒有效果。
             let isOnomatopoeia = Self.looksLikeOnomatopoeia(trimmed)
-            let body = isOnomatopoeia
-                ? "(This is a sound effect / battle cry, not a real word. Output ONLY the phonetic transliteration into \(targetName) — no explanation, no label, no parentheses, nothing else.) \(trimmed)"
-                : trimmed
+            let body: String
+            if isOnomatopoeia {
+                body = "(This is a sound effect / battle cry, not a real word. Output ONLY the phonetic transliteration into \(targetName) — no explanation, no label, no parentheses, nothing else.) \(trimmed)"
+            } else {
+                body = "(Translate in a natural, casual spoken tone as comic book dialogue, not formal written language. Output ONLY the translation — no explanation, no label, no parentheses, nothing else.) \(trimmed)"
+            }
             let prompt = "<<<source>>>\(sourceName)<<<target>>>\(targetName)<<<text>>>\(body)"
             let rawTranslated = try await Self.generateOne(
                 prompt,
                 container: container,
                 parameters: generateParameters
             )
-            let translated = isOnomatopoeia ? Self.stripLeakedInstruction(rawTranslated) : rawTranslated
+            var translated = Self.stripLeakedInstruction(rawTranslated)
+            // 原文用「...」表示語氣未完/拖長音,保留這個語感——模型常常會把它收成句號。
+            if (trimmed.hasSuffix("...") || trimmed.hasSuffix("…")), translated.hasSuffix("。") {
+                translated = String(translated.dropLast()) + "……"
+            }
             results.append(translated.isEmpty ? text : translated)
         }
 
