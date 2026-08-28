@@ -29,8 +29,8 @@ struct BubbleOverlayView: View {
             Text(text)
                 .font(.system(size: startingFontSize, weight: .heavy, design: .default))
                 .foregroundColor(textColor)
-                .minimumScaleFactor(0.5)
-                .lineLimit(3)
+                .minimumScaleFactor(0.4)
+                .lineLimit(4)
                 .multilineTextAlignment(.center)
                 .padding(4)
         }
@@ -39,8 +39,9 @@ struct BubbleOverlayView: View {
         .allowsHitTesting(false)
     }
 
-    /// 依撐大後的框高抓一個起始字級,實際顯示會被 minimumScaleFactor 再往下縮到不溢出
+    /// 依撐大後的框高抓一個起始字級,實際顯示會被 minimumScaleFactor 再往下縮到不溢出。
+    /// 合併多行文字後框會變高,字級也跟著抓比較大,乘數調低一點避免字太搶眼。
     private var startingFontSize: CGFloat {
-        max(12, inflatedSize.height * 0.6)
+        max(11, inflatedSize.height * 0.4)
     }
 }

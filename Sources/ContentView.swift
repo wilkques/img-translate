@@ -47,13 +47,13 @@ struct ContentView: View {
                                 .frame(width: geo.size.width, height: geo.size.height)
                         }
                         if showTranslated {
-                            ForEach(blocks) { block in
+                            ForEach(Self.mergedOverlayGroups(from: blocks, imageSize: imageSize)) { group in
                                 let rect = CoordinateTransform.viewRect(
-                                    forNormalizedVisionBox: block.normalizedBoundingBox,
+                                    forImagePixelRect: group.pixelRect,
                                     imagePixelSize: imageSize,
                                     containerSize: geo.size
                                 )
-                                BubbleOverlayView(text: block.translatedText ?? block.originalText, rect: rect)
+                                BubbleOverlayView(text: group.text, rect: rect)
                             }
                         }
                     }
@@ -115,6 +115,62 @@ struct ContentView: View {
         }
         .pickerStyle(.menu)
         .font(.caption)
+    }
+
+    /// 合併後的疊字群組:同一個對話框裡常常被 Vision 拆成好幾行各自的 bbox,
+    /// 各自畫一個遮色框會彼此邊緣對不齊、疊出一團(裝機實測過)。把靠近/重疊的
+    /// 文字框合併成一個,裡面塞多行文字,只畫一個乾淨的框。
+    private struct MergedOverlayGroup: Identifiable {
+        let id = UUID()
+        let text: String
+        let pixelRect: CGRect
+    }
+
+    /// 合併判斷用「撐大後」的框做碰撞測試(撐大倍率要跟 BubbleOverlayView 一致,
+    /// 不然合併決策跟實際畫出來的框對不上)。純函式,不摸 View 狀態。
+    private static func mergedOverlayGroups(from blocks: [TextBlock], imageSize: CGSize) -> [MergedOverlayGroup] {
+        guard imageSize.width > 0, imageSize.height > 0 else { return [] }
+
+        struct Item {
+            var text: String
+            var rect: CGRect       // 原始(未撐大)像素座標
+        }
+
+        func inflated(_ r: CGRect) -> CGRect {
+            let w = r.width * 1.5    // 對應 BubbleOverlayView.widthInflateFactor
+            let h = r.height * 1.0   // 對應 BubbleOverlayView.heightInflateFactor
+            return CGRect(x: r.midX - w / 2, y: r.midY - h / 2, width: w, height: h)
+        }
+
+        var items: [Item] = blocks.compactMap { block in
+            let text = block.translatedText ?? block.originalText
+            guard !text.isEmpty else { return nil }
+            let rect = CoordinateTransform.imagePixelRect(
+                forNormalizedVisionBox: block.normalizedBoundingBox, imagePixelSize: imageSize)
+            return Item(text: text, rect: rect)
+        }
+
+        // 重複掃描、合併任何一對撐大後會碰撞的框,直到沒有東西可合併為止。
+        var didMerge = true
+        while didMerge {
+            didMerge = false
+            outer: for i in items.indices {
+                for j in items.indices where j > i {
+                    guard inflated(items[i].rect).intersects(inflated(items[j].rect)) else { continue }
+                    let a = items[i], b = items[j]
+                    // 由上到下讀:pixel 座標 y 越小代表畫面越上面。
+                    let combinedText = a.rect.minY <= b.rect.minY
+                        ? "\(a.text)\n\(b.text)"
+                        : "\(b.text)\n\(a.text)"
+                    items[i] = Item(text: combinedText, rect: a.rect.union(b.rect))
+                    items.remove(at: j)
+                    didMerge = true
+                    break outer
+                }
+            }
+        }
+
+        return items.map { MergedOverlayGroup(text: $0.text, pixelRect: $0.rect) }
     }
 
     /// 依語言代碼組出 Vision 看得懂的 recognitionLanguages 格式(BCP-47)
