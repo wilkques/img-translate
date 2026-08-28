@@ -15,12 +15,29 @@ struct ContentView: View {
         return img
     }()
 
-    private let sourceLanguage = "es"
-    private let targetLanguage = "zh-Hant-TW"
+    @State private var sourceLanguage = "es"
+    @State private var targetLanguage = "zh-Hant-TW"
+
+    /// 這次先用固定清單(涵蓋 Apple Translation 常見支援語言),不即時查
+    /// `LanguageAvailability` API——那個 API 回傳的是裝置「大致支援」的語言,
+    /// 不代表某個特定語言對一定能翻,實際能不能翻由 runPipeline() 執行時
+    /// 的錯誤訊息反映出來(session.translations 丟出的 error 會顯示在狀態列)。
+    private let languageOptions: [(code: String, label: String)] = [
+        ("es", "西班牙文"),
+        ("en", "英文"),
+        ("ja", "日文"),
+        ("ko", "韓文"),
+        ("fr", "法文"),
+        ("de", "德文"),
+        ("zh-Hans", "簡體中文"),
+        ("zh-Hant-TW", "繁體中文(台灣)")
+    ]
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 12) {
+                languagePickers
+
                 GeometryReader { geo in
                     ZStack {
                         if let image {
@@ -54,7 +71,40 @@ struct ContentView: View {
             }
             .padding()
             .navigationTitle("ImgTranslate")
-            .task { await runPipeline() }
+            .task(id: "\(sourceLanguage)|\(targetLanguage)") { await runPipeline() }
+        }
+    }
+
+    private var languagePickers: some View {
+        HStack {
+            Picker("來源語言", selection: $sourceLanguage) {
+                ForEach(languageOptions, id: \.code) { option in
+                    Text(option.label).tag(option.code)
+                }
+            }
+            Text("→")
+            Picker("目標語言", selection: $targetLanguage) {
+                ForEach(languageOptions, id: \.code) { option in
+                    Text(option.label).tag(option.code)
+                }
+            }
+        }
+        .pickerStyle(.menu)
+        .font(.caption)
+    }
+
+    /// 依語言代碼組出 Vision 看得懂的 recognitionLanguages 格式(BCP-47)
+    private func visionRecognitionLanguage(for code: String) -> String {
+        switch code {
+        case "es": return "es-ES"
+        case "en": return "en-US"
+        case "ja": return "ja-JP"
+        case "ko": return "ko-KR"
+        case "fr": return "fr-FR"
+        case "de": return "de-DE"
+        case "zh-Hans": return "zh-Hans"
+        case "zh-Hant-TW": return "zh-Hant"
+        default: return code
         }
     }
 
@@ -82,7 +132,7 @@ struct ContentView: View {
         do {
             let recognized = try await TextRecognizer.recognizeText(
                 in: image,
-                recognitionLanguages: ["\(sourceLanguage)-ES", "en-US"]
+                recognitionLanguages: [visionRecognitionLanguage(for: sourceLanguage), "en-US"]
             )
             blocks = recognized.map {
                 TextBlock(originalText: $0.text, translatedText: nil, normalizedBoundingBox: $0.normalizedBoundingBox)
