@@ -70,21 +70,20 @@ final class LocalLLMTranslationEngine: ObservableObject, TranslationEngine {
                 results.append(text)
                 continue
             }
-            // ⚠️ 實驗性提示,兩種都可能被模型當成內容一起吐出來,所以一律過
-            // stripLeakedInstruction() 做保險過濾(見下方函式)。
+            // ⚠️ 狀聲詞/吼叫聲(GRRRAAAGH 這種)會被翻成「怒吼」這種描述詞,不是
+            // 漫畫慣用的擬聲字轉寫,用「連續重複字母」偵測挑出來加音譯指示,過
+            // stripLeakedInstruction() 做保險過濾(見下方函式)。裝機實測這條有效
+            // 且乾淨,語言也正確。
             //
-            // (1) 狀聲詞/吼叫聲(GRRRAAAGH 這種)會被翻成「怒吼」這種描述詞,不是
-            //     漫畫慣用的擬聲字轉寫,用「連續重複字母」偵測挑出來加音譯指示。
-            // (2) 一般對話預設翻得偏書面/正式(「你很吵」),想要更貼近口語漫畫台詞
-            //     的語氣(「你吵死了」這種),加一句語氣指示——TranslateGemma 是翻譯
-            //     專用微調模型,語氣調整的服從度沒把握,需要裝機驗證有沒有效果。
+            // 曾經試過對「一般對話」也加語氣提示(要口語一點、像漫畫台詞),裝機
+            // 實測會讓 TranslateGemma 不穩定、整句翻成錯的語言(例如 "YA BASTA..."
+            // 翻成土耳其文而不是繁中,temperature=0 貪婪解碼下這是穩定重現的行為,
+            // 不是隨機運氣)——這支模型是窄用途翻譯微調,輸入格式偏離「純文字待譯」
+            // 太多就容易失控。已改回一般對話不加任何提示,正確性優先於語氣潤飾。
             let isOnomatopoeia = Self.looksLikeOnomatopoeia(trimmed)
-            let body: String
-            if isOnomatopoeia {
-                body = "(This is a sound effect / battle cry, not a real word. Output ONLY the phonetic transliteration into \(targetName) — no explanation, no label, no parentheses, nothing else.) \(trimmed)"
-            } else {
-                body = "(Translate in a natural, casual spoken tone as comic book dialogue, not formal written language. Output ONLY the translation — no explanation, no label, no parentheses, nothing else.) \(trimmed)"
-            }
+            let body = isOnomatopoeia
+                ? "(This is a sound effect / battle cry, not a real word. Output ONLY the phonetic transliteration into \(targetName) — no explanation, no label, no parentheses, nothing else.) \(trimmed)"
+                : trimmed
             let prompt = "<<<source>>>\(sourceName)<<<target>>>\(targetName)<<<text>>>\(body)"
             let rawTranslated = try await Self.generateOne(
                 prompt,
