@@ -9,6 +9,16 @@ struct ContentView: View {
     @State private var imageSize: CGSize = .zero
     @State private var smokeTestResult = ""
     @StateObject private var appleEngine = AppleTranslationEngine()
+    @StateObject private var localEngine = LocalLLMTranslationEngine()
+
+    enum EngineChoice: String, CaseIterable {
+        case apple = "系統翻譯(已知會卡住)"
+        case local = "本機模型(MLX)"
+    }
+
+    // Apple Translation 已確認在 LiveContainer 下會永遠卡住(debugLog 定位到
+    // session.translations(from:) 本身卡死),預設改選本機模型。
+    @State private var engineChoice: EngineChoice = .local
 
     private let image: UIImage? = {
         guard let path = Bundle.main.path(forResource: "sample-es", ofType: "jpg"),
@@ -38,6 +48,8 @@ struct ContentView: View {
         NavigationStack {
             VStack(spacing: 12) {
                 languagePickers
+
+                enginePicker
 
                 GeometryReader { geo in
                     ZStack {
@@ -76,7 +88,45 @@ struct ContentView: View {
             }
             .padding()
             .navigationTitle("ImgTranslate")
-            .task(id: "\(sourceLanguage)|\(targetLanguage)") { await runPipeline() }
+            .task(id: "\(sourceLanguage)|\(targetLanguage)|\(engineChoice.rawValue)") { await runPipeline() }
+        }
+    }
+
+    private var enginePicker: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Picker("翻譯引擎", selection: $engineChoice) {
+                ForEach(EngineChoice.allCases, id: \.self) { choice in
+                    Text(choice.rawValue).tag(choice)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            if engineChoice == .local {
+                localEngineStatusLine
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var localEngineStatusLine: some View {
+        switch localEngine.phase {
+        case .idle:
+            EmptyView()
+        case .downloading(let fraction):
+            ProgressView(value: fraction) {
+                Text("下載模型中 \(Int(fraction * 100))%(約 2.2GB,首次執行請連 WiFi)")
+                    .font(.caption2)
+            }
+        case .loadingWeights:
+            ProgressView { Text("載入模型權重中…").font(.caption2) }
+        case .translating(let done, let total):
+            ProgressView(value: Double(done), total: Double(max(total, 1))) {
+                Text("本機模型翻譯中 \(done)/\(total)").font(.caption2)
+            }
+        case .ready:
+            Text("本機模型就緒").font(.caption2).foregroundStyle(.secondary)
+        case .failed(let message):
+            Text("本機模型失敗:\(message)").font(.caption2).foregroundStyle(.red)
         }
     }
 
@@ -172,11 +222,21 @@ struct ContentView: View {
             }
             status = "辨識到 \(blocks.count) 段文字,翻譯中…"
 
-            let translated = try await appleEngine.translate(
-                blocks.map { $0.originalText },
-                from: sourceLanguage,
-                to: targetLanguage
-            )
+            let translated: [String]
+            switch engineChoice {
+            case .apple:
+                translated = try await appleEngine.translate(
+                    blocks.map { $0.originalText },
+                    from: sourceLanguage,
+                    to: targetLanguage
+                )
+            case .local:
+                translated = try await localEngine.translate(
+                    blocks.map { $0.originalText },
+                    from: sourceLanguage,
+                    to: targetLanguage
+                )
+            }
             for i in blocks.indices where i < translated.count {
                 blocks[i].translatedText = translated[i]
             }
