@@ -58,6 +58,17 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         temperature: 0.2
     )
 
+    /// ⚠️ 裝機實測歷程(第 3 輪):maxTokens 拉回 150 後,合併多行框不再被截斷,
+    /// 但含大量重複字母的狀聲詞("UWAAA"、"GRRRRRRAAAAGH")本身就在提示模型「接下來
+    /// 繼續重複同一個字」,Step 1 要求逐字複誦這種輸入時偶爾還是會卡進重複迴圈,被
+    /// `isDegenerateOutput` 抓到。這兩塊是裝機實測目前唯一還會卡住的案例,不值得把
+    /// 常駐溫度整體拉高(會犧牲另外兩塊已經翻對的句子的穩定性)——改成只有偵測到
+    /// 退化輸出時,原地重試一次、用更高溫度打散貪婪路徑。
+    private let retryParameters = GenerateParameters(
+        maxTokens: 150,
+        temperature: 0.7
+    )
+
     /// 送進 VLM 前把裁切圖的長邊縮放到這個尺寸。
     ///
     /// 這是必要條件不是優化:Qwen3-VL 的 processor 不吃 `UserInput.Processing` 的
@@ -79,13 +90,18 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         let sourceName = try LanguageNames.name(for: source)
         let targetName = try LanguageNames.name(for: target)
         let container = try await ensureLoaded()
+        let prompt = Self.makePrompt(source: sourceName, target: targetName)
 
-        let raw = try await Self.generateOne(
-            image: region,
-            prompt: Self.makePrompt(source: sourceName, target: targetName),
-            container: container,
-            parameters: generateParameters
-        )
+        var raw = try await Self.generateOne(
+            image: region, prompt: prompt, container: container, parameters: generateParameters)
+
+        // 卡進重複迴圈的都是同一小撮「來源文字本身就重複字母」的難字,原地用更高溫度
+        // 重試一次,不用常駐拉高溫度、不影響已經翻對的正常句子。
+        if Self.isDegenerateOutput(raw) {
+            raw = try await Self.generateOne(
+                image: region, prompt: prompt, container: container, parameters: retryParameters)
+        }
+
         return Self.parse(raw)
     }
 
