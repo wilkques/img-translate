@@ -1,3 +1,4 @@
+import Foundation
 import CoreGraphics
 
 struct TextBlock: Identifiable {

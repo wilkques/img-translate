@@ -1,3 +1,4 @@
+import Foundation
 import Translation
 import SwiftUI
 

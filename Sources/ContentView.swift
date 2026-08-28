@@ -1,4 +1,6 @@
 import SwiftUI
+import UIKit
+import Foundation
 
 struct ContentView: View {
     @State private var blocks: [TextBlock] = []

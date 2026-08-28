@@ -1,4 +1,5 @@
 import SwiftUI
+import CoreGraphics
 
 /// 畫一塊遮色矩形蓋住原文,再把翻譯文字置中畫上去。
 /// 翻譯後文字長度跟原文不一定一樣長,用 `minimumScaleFactor` 自動縮字避免溢出。
