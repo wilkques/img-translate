@@ -44,11 +44,14 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     private var container: ModelContainer?
     private var loadTask: Task<ModelContainer, Error>?
 
-    /// temperature 0 = 貪婪解碼。翻譯要穩定不要創意,這種讀字任務有隨機性等於災難。
-    /// maxTokens 128:輸出只有兩行(ORIGINAL/TRANSLATION),128 綽綽有餘,同時是防呆。
+    /// ⚠️ 裝機實測發現:temperature 0(純貪婪解碼)在難讀的裁圖(扭曲字體、裁太緊)
+    /// 上會卡進「同一個字元一直重複」的生成迴圈(例如整段輸出變成一長串 "iiiii..."),
+    /// 燒光 maxTokens 也生不出正常的 ORIGINAL/TRANSLATION 格式。改用一個很小的非零
+    /// 溫度降低卡迴圈機率,翻譯仍然接近穩定(不是 0 但很低,不追求創意)。
+    /// maxTokens 從 128 降到 80:一樣的迴圈萬一還是發生,少燒一點時間就失敗。
     private let generateParameters = GenerateParameters(
-        maxTokens: 128,
-        temperature: 0.0
+        maxTokens: 80,
+        temperature: 0.2
     )
 
     /// 送進 VLM 前把裁切圖的長邊縮放到這個尺寸。
@@ -154,7 +157,18 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
 
     /// 寬鬆解析:抓得到 ORIGINAL:/TRANSLATION: 就拆兩欄,抓不到就把整段當譯文。
     /// 不做嚴格驗證——4B 模型偶爾不照格式是正常的,不能因此讓整塊變空白。
+    ///
+    /// ⚠️ 裝機實測抓到的失敗模式:貪婪解碼在難讀的裁圖上偶爾會卡進「同一個字元一直
+    /// 重複」的生成迴圈(整段變成一長串 "iiiii..."),這種輸出裡通常也抓不到
+    /// ORIGINAL:/TRANSLATION: 標籤,原本的 fallback(抓不到就整段當譯文)會把這坨
+    /// 垃圾直接顯示出來。加一道退化偵測,抓到就回傳明確的失敗訊息而不是垃圾文字,
+    /// 除錯清單上至少看得出「這塊生成失敗」而不是誤以為翻譯結果就長這樣。
     nonisolated static func parse(_ raw: String) -> ImageRegionTranslation {
+        if isDegenerateOutput(raw) {
+            return ImageRegionTranslation(
+                recognizedText: "", translatedText: "[生成失敗:輸出異常重複]", rawOutput: raw)
+        }
+
         var original = ""
         var translated = ""
 
@@ -173,6 +187,23 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
         }
         return ImageRegionTranslation(recognizedText: original, translatedText: translated, rawOutput: raw)
+    }
+
+    /// 同一個非空白字元連續出現超過這個次數,判定生成卡進重複迴圈了。
+    /// 一般正常語句(包含中文疊字、西班牙文重複字母的狀聲詞)不會連續重複這麼多次。
+    private static func isDegenerateOutput(_ raw: String, threshold: Int = 12) -> Bool {
+        var runLength = 0
+        var previous: Character?
+        for ch in raw where !ch.isWhitespace {
+            if ch == previous {
+                runLength += 1
+                if runLength >= threshold { return true }
+            } else {
+                runLength = 1
+            }
+            previous = ch
+        }
+        return false
     }
 
     // MARK: - 載入(含下載)
