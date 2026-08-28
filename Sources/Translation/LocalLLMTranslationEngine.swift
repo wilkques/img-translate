@@ -8,9 +8,10 @@ import MLXLMCommon
 /// 模型:mlx-community/translategemma-4b-it-4bit(2.22GB,Google TranslateGemma 翻譯專用微調)
 ///
 /// 為什麼不用自己寫「只輸出翻譯、不要解釋」的 system prompt:
-/// TranslateGemma 的 chat template 已經內建這段指示。`LLMRegistry.translategemma_4b_it_4bit`
-/// 掛的訊息產生邏輯會把 `UserInput.additionalContext` 裡的 source_lang_code/target_lang_code
-/// 塞進 template,template 自己會渲染出完整的翻譯指示。我們只要餵原文 + 兩個語言代碼即可。
+/// TranslateGemma 的 chat template(隨模型 repo 附的 chat_template.jinja)已經內建這段指示,
+/// 會讀 `UserInput.additionalContext` 裡的 source_lang_code/target_lang_code 塞進模板渲染出
+/// 完整的翻譯指示。`HuggingFaceTokenizerBridge.applyChatTemplate` 會把 additionalContext
+/// 原封不動轉給 swift-transformers 的 tokenizer,不需要模型專屬的訊息產生器。
 @MainActor
 final class LocalLLMTranslationEngine: ObservableObject, TranslationEngine {
 
@@ -28,7 +29,10 @@ final class LocalLLMTranslationEngine: ObservableObject, TranslationEngine {
     /// 顯示用的模型大小估計(給下載提示用)
     static let approximateDownloadBytes: Int64 = 2_300_000_000
 
-    private static let configuration = LLMRegistry.translategemma_4b_it_4bit
+    /// mlx-swift-lm 的 LLMRegistry 沒有內建 TranslateGemma 的 preset,手動建
+    /// ModelConfiguration 指向 HF repo——套件的通用 gemma3 型別處理器就能載入,
+    /// 不需要 registry 裡有現成項目。
+    private static let configuration = ModelConfiguration(id: "mlx-community/translategemma-4b-it-4bit")
 
     private var container: ModelContainer?
     private var loadTask: Task<ModelContainer, Error>?
@@ -73,7 +77,7 @@ final class LocalLLMTranslationEngine: ObservableObject, TranslationEngine {
 
         phase = .ready
         // 每一批做完釋放 Metal buffer cache,避免在 LiveContainer 的記憶體上限下累積。
-        MLX.GPU.clearCache()
+        MLX.Memory.clearCache()
         return results
     }
 
@@ -115,7 +119,7 @@ final class LocalLLMTranslationEngine: ObservableObject, TranslationEngine {
 
         // 限制 MLX 的 buffer cache,LiveContainer 記憶體上限雖然實測有 ~6GB,
         // 但模型權重就佔 2.2GB,不設限的話 cache 會一路長。
-        MLX.GPU.set(cacheLimit: 256 * 1024 * 1024)
+        MLX.Memory.cacheLimit = 256 * 1024 * 1024
 
         let configuration = Self.configuration
 
@@ -164,7 +168,7 @@ final class LocalLLMTranslationEngine: ObservableObject, TranslationEngine {
         container = nil
         loadTask?.cancel()
         loadTask = nil
-        MLX.GPU.clearCache()
+        MLX.Memory.clearCache()
         phase = .idle
     }
 
