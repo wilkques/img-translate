@@ -126,9 +126,10 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         written in \(source), in a stylised hand-lettered bold font. It may be a sound \
         effect or a shout rather than a real word.
 
-        Step 1. Read the text exactly as it is drawn, character by character. Keep \
-        repeated letters (for example "UWAA"), punctuation, and inverted marks (¡ ¿) \
-        exactly as they appear. Do not correct it into a real word.
+        Step 1. Read the text as it is drawn. Keep punctuation and inverted marks (¡ ¿). \
+        Do not correct it into a real word. If a letter is repeated many times (a long \
+        scream or sound effect), do NOT try to count the exact number of repeats — just \
+        write a short natural amount (2-4 repeats is enough) and move on to Step 2.
         Step 2. Translate it into \(target). If it is a sound effect or a scream, \
         transliterate the sound into \(target) instead of translating its literal meaning.
 
