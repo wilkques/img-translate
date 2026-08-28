@@ -1,0 +1,7 @@
+*.xcodeproj/
+build/
+DerivedData/
+Payload/
+*.ipa
+Support/Info.plist
+.DS_Store

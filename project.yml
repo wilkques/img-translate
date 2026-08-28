@@ -1,0 +1,64 @@
+name: MangaTranslate
+
+options:
+  bundleIdPrefix: dev.cyril
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: false
+
+settings:
+  base:
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    # 明確鎖 Swift 5 語言模式:Xcode 26 預設會把沒宣告的專案往 Swift 6
+    # strict concurrency 推,會讓這份 Swift 5 風格的程式碼變成編譯錯誤。
+    SWIFT_VERSION: "5.0"
+    TARGETED_DEVICE_FAMILY: "1,2"
+    # LiveContainer 官方說 arm64e 未測試、建議 arm64
+    ARCHS: arm64
+    EXCLUDED_ARCHS: arm64e
+    ONLY_ACTIVE_ARCH: NO
+    ENABLE_BITCODE: NO
+    ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES: NO
+    # 不簽名:LiveContainer 會用自己的憑證重簽
+    CODE_SIGN_IDENTITY: ""
+    CODE_SIGNING_REQUIRED: NO
+    CODE_SIGNING_ALLOWED: NO
+    CODE_SIGN_STYLE: Manual
+    DEVELOPMENT_TEAM: ""
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+
+targets:
+  MangaTranslate:
+    type: application
+    platform: iOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.cyril.mangatranslate
+        PRODUCT_NAME: MangaTranslate
+    sources:
+      - path: Sources
+      - path: Fixtures
+    dependencies:
+      - sdk: Vision.framework
+      - sdk: Translation.framework
+    info:
+      path: Support/Info.plist
+      properties:
+        CFBundleDisplayName: MangaTranslate
+        UILaunchScreen: {}
+        UIRequiredDeviceCapabilities:
+          - arm64
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+
+schemes:
+  MangaTranslate:
+    build:
+      targets:
+        MangaTranslate: all
+    run:
+      config: Release
+    archive:
+      config: Release

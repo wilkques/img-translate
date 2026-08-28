@@ -1,0 +1,100 @@
+name: Build unsigned IPA
+
+on:
+  push:
+    branches: [ master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    # 2026-08 現況:macos-latest = macOS 26,預設 Xcode 26.6。
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    env:
+      SCHEME: MangaTranslate
+      PROJECT: MangaTranslate.xcodeproj
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 環境資訊
+        run: |
+          sw_vers
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: 安裝 XcodeGen
+        run: |
+          set -euo pipefail
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen --version
+
+      - name: 產生 Xcode 專案
+        run: xcodegen generate --spec project.yml
+
+      - name: 診斷用 build settings
+        run: |
+          xcodebuild -project "$PROJECT" -scheme "$SCHEME" \
+            -configuration Release -sdk iphoneos -showBuildSettings \
+            | grep -E 'PRODUCT_NAME|PRODUCT_BUNDLE_IDENTIFIER|BUILT_PRODUCTS_DIR|IPHONEOS_DEPLOYMENT_TARGET|^ *ARCHS|SWIFT_VERSION' || true
+
+      - name: 編譯(unsigned, device)
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_ENTITLEMENTS="" \
+            ENABLE_BITCODE=NO \
+            clean build
+
+      - name: 打包 IPA(同時產 unsigned 與 ad-hoc 兩顆)
+        run: |
+          set -euo pipefail
+          APP=$(find build/Build/Products -maxdepth 2 -name '*.app' -type d | head -n 1)
+          echo "APP=$APP"
+          test -n "$APP"
+          file "$APP/MangaTranslate" || true
+          lipo -info "$APP/MangaTranslate" || true
+
+          rm -rf Payload && mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry "MangaTranslate-unsigned.ipa" Payload
+
+          rm -rf Payload && mkdir -p Payload
+          cp -R "$APP" Payload/
+          if codesign --force --sign - --timestamp=none "Payload/$(basename "$APP")"; then
+            echo "ad-hoc 簽名成功"
+          else
+            echo "ad-hoc 簽名失敗,這顆與 unsigned 相同"
+          fi
+          zip -qry "MangaTranslate-adhoc.ipa" Payload
+
+          ls -lh MangaTranslate-*.ipa
+          unzip -l MangaTranslate-unsigned.ipa | head -30
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MangaTranslate-ipa
+          path: |
+            MangaTranslate-unsigned.ipa
+            MangaTranslate-adhoc.ipa
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 失敗時上傳 build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: build/Logs
+          if-no-files-found: ignore
