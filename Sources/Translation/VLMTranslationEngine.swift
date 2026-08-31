@@ -120,22 +120,31 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     ///   是通用 instruct 模型,理論上吃得住多步驟指令,裝機驗證有沒有效果
     /// - 要求輸出兩行(ORIGINAL/TRANSLATION):補上「判斷是辨識錯還是翻譯錯」的
     ///   除錯需求,成本只有幾個 token
+    ///
+    /// ⚠️ 裝機實測歷程:原本 Step 1 讀原文、Step 2 才翻譯——結果對重複字母極多的
+    /// 狀聲詞(UWAAA/GRRRRRRAAAAGH),模型會把 token 額度耗在複誦原文上,兩輪修法
+    /// (放寬「精確複誦」要求、失敗時重試拉高溫度)都沒解決,因為問題不是措辭,是
+    /// **順序**——只要 TRANSLATION 排在 ORIGINAL 後面,模型卡在複誦原文時翻譯永遠
+    /// 生不出來。改成**先要求 TRANSLATION、ORIGINAL 放第二行**:就算模型後面卡在
+    /// 複誦原文的重複字母,真正需要的譯文已經先寫出來了。`parse()` 本來就是逐行找
+    /// 兩個標籤、不假設順序,不用改。
     private static func makePrompt(source: String, target: String) -> String {
         """
         This image is one small text region cropped from a comic page. The text is \
         written in \(source), in a stylised hand-lettered bold font. It may be a sound \
         effect or a shout rather than a real word.
 
-        Step 1. Read the text as it is drawn. Keep punctuation and inverted marks (¡ ¿). \
-        Do not correct it into a real word. If a letter is repeated many times (a long \
-        scream or sound effect), do NOT try to count the exact number of repeats — just \
-        write a short natural amount (2-4 repeats is enough) and move on to Step 2.
-        Step 2. Translate it into \(target). If it is a sound effect or a scream, \
-        transliterate the sound into \(target) instead of translating its literal meaning.
+        Step 1. Translate the text into \(target). If it is a sound effect or a scream, \
+        transliterate the sound into \(target) instead of translating its literal meaning. \
+        Keep any repeated sound short and natural (2-4 repeats is enough), do not try to \
+        match the exact number of repeats in the image.
+        Step 2. Read the original text as it is drawn, for reference. Keep punctuation and \
+        inverted marks (¡ ¿), do not correct it into a real word, and likewise keep any \
+        repeated letters to a short natural amount (2-4 repeats) instead of the exact count.
 
         Reply with exactly two lines and nothing else, no explanation, no quotes:
-        ORIGINAL: <the text you read>
         TRANSLATION: <the \(target) text>
+        ORIGINAL: <the text you read>
         """
     }
 
