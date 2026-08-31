@@ -19,4 +19,19 @@ struct TextBlock: Identifiable {
     var usedWiderContextRetry: Bool = false
     /// 走過重試時,主要路線(緊裁圖)那次的原始輸出,用來對照兩次生成差在哪。
     var firstAttemptRawOutput: String?
+
+    /// 這塊的譯文是哪條路線產生的。
+    var source: TranslationSource = .none
+    /// 整頁路線對位到的項目編號(模型給的 BLOCK 編號)。
+    var matchedItemIndex: Int?
+    /// 對位的字串相似度分數。印在除錯清單上,讓接受門檻可以用實測數字校準,
+    /// 而不是繼續用猜的。
+    var matchScore: Double?
+}
+
+/// 譯文的來源路線,除錯清單顯示用。
+enum TranslationSource: String {
+    case none = "—"
+    case wholePage = "整頁"
+    case regionFallback = "逐塊"
 }

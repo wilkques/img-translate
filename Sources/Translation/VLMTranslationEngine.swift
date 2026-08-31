@@ -92,6 +92,16 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     /// 縮放目標不跟著放大的話,目標文字反而會比緊裁版本更模糊。
     private static let retryVisionLongEdge: CGFloat = 1024
 
+    /// 整頁一次呼叫的生成參數。輸出比逐塊長很多(N 個區塊 × 3 行),額度要放大。
+    ///
+    /// 溫度沿用 0.2:裝機證據顯示 0.7 對這顆 4-bit 模型是**加重**卡迴圈而不是緩解,
+    /// 而且這一輪刻意只改「模型看到多大範圍的圖」這一個變因——同時動多個變因正是
+    /// 前面八輪查不出根因的原因。
+    private let pageGenerateParameters = GenerateParameters(
+        maxTokens: 512,
+        temperature: 0.2
+    )
+
     // MARK: - ImageTranslationEngine
 
     func translateRegion(
@@ -130,10 +140,128 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         return Self.parse(raw)
     }
 
+    /// 整頁一次讀完(見 `ImageTranslationEngine.translatePage` 的說明)。
+    func translatePage(
+        _ page: CGImage,
+        expectedBlockCount: Int,
+        from source: String,
+        to target: String
+    ) async throws -> ImagePageTranslation? {
+        let sourceName = try LanguageNames.name(for: source)
+        let targetName = try LanguageNames.name(for: target)
+        let container = try await ensureLoaded()
+
+        let prompt = Self.makePagePrompt(
+            source: sourceName, target: targetName, approximateBlockCount: expectedBlockCount)
+
+        var processing = UserInput.Processing()
+        processing.resize = Self.pageResizeTarget(
+            pixelSize: CGSize(width: page.width, height: page.height))
+        let userInput = UserInput(
+            chat: [.user(prompt, images: [.ciImage(CIImage(cgImage: page))])],
+            processing: processing
+        )
+
+        let lmInput = try await container.prepare(input: userInput)
+        let stream = try await container.generate(input: lmInput, parameters: pageGenerateParameters)
+
+        // ⚠️ 這個 for-await 迴圈刻意留在 @MainActor 方法裡,不抽成 nonisolated static:
+        // 迴圈本體只是字串累加(真正的推理跑在 ModelContainer 那個 actor 裡),留在
+        // 這裡就能直接讀寫 self 的狀態,不需要任何跨 isolation 的閃避動作——先前兩次
+        // 編譯失敗都是踩在「nonisolated static 呼叫 MainActor-isolated static」上。
+        var raw = ""
+        for await event in stream {
+            if let chunk = event.chunk { raw += chunk }
+        }
+
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let items = PageOutputParser.parse(
+            trimmed, maxItems: Self.pageItemLimit(expectedBlockCount: expectedBlockCount))
+        return ImagePageTranslation(items: items, rawOutput: trimmed)
+    }
+
     /// 呼叫端跑完整頁之後呼叫,把 Metal buffer cache 還回去。
     /// 不要每塊都叫——那會逼 MLX 每次重新配置緩衝區,反而更慢。
     func finishPage() {
         MLX.Memory.clearCache()
+    }
+
+    /// 一頁最多解析幾個項目,防止模型無限列下去。取 max 保底,避免 Vision 只框到
+    /// 一兩塊時把上限壓得太死。
+    private nonisolated static func pageItemLimit(expectedBlockCount: Int) -> Int {
+        max(12, expectedBlockCount * 3)
+    }
+
+    /// 整頁送進 VLM 前的縮放目標。
+    ///
+    /// ⚠️ `MediaProcessing.apply()` 用 `bestFitScale = min(tw/W, th/H)`,所以傳
+    /// **非正方形**目標不是沒意義的——那等於同時表達「寬度 fit 到 tw」與「高度上限
+    /// th」。正方形只是「長邊 fit 到 N」這個特例。一般漫畫頁用正方形就好;條漫那種
+    /// 超長頁用正方形會因為長邊 fit 而把寬度壓到剩幾百像素、字整個糊掉,要改成
+    /// 「寬度 fit + 高度上限」。
+    ///
+    /// 1024 的依據:`sample-es.jpg` 是 589×1145,長邊 fit 1024 → 527×1024,只縮
+    /// 0.89 倍,幾乎等於原生解析度(Vision 在原生 589 寬就抓得到框,解析度從來不是
+    /// 這次失敗的瓶頸)。視覺 token 量約 (527/32)×(1024/32) ≈ 530,比現在四次逐塊
+    /// 呼叫的總和**還便宜**。
+    private nonisolated static func pageResizeTarget(pixelSize: CGSize) -> CGSize {
+        let aspect = pixelSize.height / max(pixelSize.width, 1)
+        if aspect <= 2.0 { return CGSize(width: 1024, height: 1024) }
+        return CGSize(width: 1024, height: 3072)
+    }
+
+    /// 整頁 prompt。
+    ///
+    /// 沿用模型已經證明會正確輸出的 `ORIGINAL:`/`TRANSLATION:` 兩行,並保留已驗證的
+    /// ORIGINAL→TRANSLATION 順序(第六輪實測證明對調是負分,連原本翻對的句子都會壞)。
+    ///
+    /// 三個針對實測失敗模式的設計:
+    /// 1. 「同一個字母不准連續超過 4 次」放在獨立的 Rules 區塊當**硬規則**,不是埋在
+    ///    步驟裡的軟要求——第五輪證明軟措辭沒有用。
+    /// 2. 「太難讀就寫 `ORIGINAL: ?`,不要停在難的那個」給一個明確的逃生口:卡迴圈的
+    ///    根源就是重複字母沒有自然的停止點。
+    /// 3. `BLOCK n` 分隔給模型「後面還有別塊要列」的前進壓力(單獨面對一塊
+    ///    `UWAAAAA…` 時完全沒有前進壓力),同時給解析器明確的項目邊界。
+    ///
+    /// **刻意不做**:把 Vision 的 OCR 文字當提示塞進 prompt(那樣對位會變得很簡單)。
+    /// 那會重新引入混合式架構要避開的污染——模型會錨定在 `¡LIWA! ¡¡LWAA!!` 上複製
+    /// Vision 的錯誤,正是先前翻出「離哇」的成因。Vision 文字只在事後當對位訊號。
+    private nonisolated static func makePagePrompt(
+        source: String, target: String, approximateBlockCount: Int
+    ) -> String {
+        """
+        This is a full page from a comic book. All the text on it is written in \
+        \(source), in a stylised hand-lettered bold font. Some of it is dialogue in \
+        speech balloons, some of it is shouting or a sound effect drawn across the artwork.
+
+        List every piece of \(source) text on the page, in reading order: top to bottom, \
+        and for text at the same height, left to right. There are roughly \
+        \(approximateBlockCount) separate text areas; if you see more or fewer, list what \
+        you actually see.
+
+        For each text area:
+        Step 1. Read the text as it is drawn. Keep punctuation and inverted marks (¡ ¿). \
+        Do not correct it into a real word — it may be a scream or a sound effect rather \
+        than a word.
+        Step 2. Translate it into \(target). If it is a sound effect or a scream, \
+        transliterate the sound into \(target) instead of translating its literal meaning.
+
+        Rules:
+        - Never write the same letter more than 4 times in a row, in any line, for any reason.
+        - If a text area is too hard to read, write "ORIGINAL: ?" and still give your best \
+        TRANSLATION, then move on to the next one. Never stop on a hard one.
+        - Do not describe the artwork, the characters or the panels. Text only.
+
+        Output exactly this and nothing else, no explanation, no quotes:
+        BLOCK 1
+        ORIGINAL: <the text you read>
+        TRANSLATION: <the \(target) text>
+        BLOCK 2
+        ORIGINAL: ...
+        TRANSLATION: ...
+
+        Continue until every text area on the page is listed, then stop.
+        """
     }
 
     // MARK: - Prompt

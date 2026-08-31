@@ -65,6 +65,21 @@ enum RegionMerger {
             }
         }
 
-        return items.map { TextRegion(pixelRect: $0.rect, visionTexts: $0.texts) }
+        // 合併迴圈的 `items.remove(at: j)` 會讓陣列順序變成任意,這裡補上閱讀順序排序。
+        // 這是整頁路線「依順序對位」的硬前提(模型依閱讀順序列出文字,我們的區塊也
+        // 必須是同一個順序),順帶讓除錯清單變成由上到下排列,裝機截圖好判讀很多。
+        // 疊字渲染與陣列索引無關,重排不影響畫面。
+        return items
+            .sorted { readingOrderPrecedes($0.rect, $1.rect) }
+            .map { TextRegion(pixelRect: $0.rect, visionTexts: $0.texts) }
+    }
+
+    /// 閱讀順序:由上到下;垂直範圍重疊超過較矮那塊的一半時視為同一列,改由左到右。
+    static func readingOrderPrecedes(_ a: CGRect, _ b: CGRect) -> Bool {
+        let verticalOverlap = min(a.maxY, b.maxY) - max(a.minY, b.minY)
+        if verticalOverlap > min(a.height, b.height) * 0.5 {
+            return a.minX < b.minX
+        }
+        return a.minY < b.minY
     }
 }

@@ -4,8 +4,13 @@ import Foundation
 
 struct ContentView: View {
     enum EngineKind: String, CaseIterable {
-        case vision = "視覺模型(VLM 讀圖)"
-        case text = "文字模型(OCR+TranslateGemma)"
+        /// 整頁一次讀完再配回 bbox。新的預設——裝機證據顯示同級模型看整張圖讀得出
+        /// 我們一直失敗的狀聲詞,問題出在裁圖太小沒有上下文。
+        case visionPage = "整頁VLM"
+        /// 現行逐塊裁圖路線,原封不動保留當對照組(同一顆 build 就能切換比較,
+        /// 不用再等一次 CI)。
+        case visionRegion = "逐塊VLM"
+        case text = "文字模型"
     }
 
     @State private var blocks: [TextBlock] = []
@@ -16,7 +21,14 @@ struct ContentView: View {
     @State private var status = "準備中…"
     @State private var imageSize: CGSize = .zero
     @State private var smokeTestResult = ""
-    @State private var engineKind: EngineKind = .vision
+    @State private var engineKind: EngineKind = .visionPage
+    /// 整頁路線的模型完整原始輸出。這是本輪最重要的除錯產物,完整顯示不截斷。
+    @State private var pageRawOutput = ""
+    @State private var pageItemCount = 0
+
+    /// 整頁項目與 Vision 區塊的對位接受門檻(字串相似度)。起手值,等裝機把實際
+    /// 分數印出來再校準——分數會顯示在除錯清單每一列上。
+    private static let pageMatchThreshold = 0.3
     @StateObject private var localEngine = LocalLLMTranslationEngine()
     @StateObject private var vlmEngine = VLMTranslationEngine()
 
@@ -72,6 +84,8 @@ struct ContentView: View {
 
                 Text(status).font(.caption).foregroundStyle(.secondary)
 
+                pageDebugSection
+
                 debugList
 
                 Button(showTranslated ? "顯示原圖" : "顯示疊字翻譯") {
@@ -101,14 +115,14 @@ struct ContentView: View {
             // LiveContainer 的記憶體上限),切換引擎時把沒在用的那個卸載掉。
             .onChange(of: engineKind) { _, newValue in
                 switch newValue {
-                case .vision: localEngine.unload()
+                case .visionPage, .visionRegion: localEngine.unload()
                 case .text: vlmEngine.unload()
                 }
             }
 
             switch engineKind {
             case .text: localEngineStatusLine
-            case .vision: vlmEngineStatusLine
+            case .visionPage, .visionRegion: vlmEngineStatusLine
             }
         }
     }
@@ -242,6 +256,8 @@ struct ContentView: View {
                                 Text("VLM讀到:\(recognized)")
                             }
                             Text("譯文:\(block.translatedText ?? "…")")
+                            Text(Self.sourceLine(for: block))
+                                .foregroundStyle(block.source == .wholePage ? .green : .secondary)
 
                             if block.usedWiderContextRetry {
                                 Text("↻ 已走寬裁圖重試(橘框=重試看到的圖)")
@@ -263,7 +279,49 @@ struct ContentView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(height: 300)
+        // 整頁模式上方多了 pageDebugSection,清單高度收一點,不要把上面的圖擠掉。
+        .frame(height: 260)
+    }
+
+    /// 每列的「這段譯文哪來的」說明。整頁對位成功時附上相似度分數,方便用實測
+    /// 數字校準 `pageMatchThreshold`,不要再用猜的。
+    private static func sourceLine(for block: TextBlock) -> String {
+        switch block.source {
+        case .none:
+            return "來源:—"
+        case .wholePage:
+            let index = block.matchedItemIndex.map { "#\($0)" } ?? "?"
+            let score = block.matchScore.map { String(format: "%.2f", $0) } ?? "?"
+            return "來源:整頁 \(index) 分數 \(score)"
+        case .regionFallback:
+            return "來源:逐塊(整頁沒對到)"
+        }
+    }
+
+    /// 整頁模式專用的頁層級除錯區段。
+    ///
+    /// 整頁原始輸出是本輪最重要的除錯產物:一張截圖就能同時回答「模型有沒有讀對難字」
+    /// 「有沒有卡迴圈」「總共列了幾塊」「順序對不對」——而且**與對位成功與否無關**,
+    /// 所以要完整顯示、可展開、可複製,不能截斷。
+    @ViewBuilder
+    private var pageDebugSection: some View {
+        if engineKind == .visionPage && !pageRawOutput.isEmpty {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("整頁輸出 \(pageItemCount) 項 / Vision 定位 \(blocks.count) 塊")
+                if pageItemCount != blocks.count {
+                    Text("⚠️ 數量不符,整批退回逐塊(不做猜測性對位)")
+                        .foregroundStyle(.orange)
+                }
+                DisclosureGroup("整頁原始輸出(\(pageRawOutput.count) 字)") {
+                    Text(pageRawOutput)
+                        .font(.system(.caption2, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .font(.system(.caption2, design: .monospaced))
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     /// 卡進重複迴圈的原始輸出可能長達上百字元,全部顯示會把清單撐爆,
@@ -291,6 +349,8 @@ struct ContentView: View {
         imageSize = CGSize(width: pixelWidth, height: pixelHeight)
         cropPreviews = [:]
         widerCropPreviews = [:]
+        pageRawOutput = ""
+        pageItemCount = 0
 
         status = "OCR 定位中…"
         do {
@@ -311,8 +371,10 @@ struct ContentView: View {
             switch engineKind {
             case .text:
                 try await runTextPipeline()
-            case .vision:
+            case .visionRegion:
                 try await runVisionPipeline(page: page, pixelWidth: pixelWidth, pixelHeight: pixelHeight)
+            case .visionPage:
+                try await runVisionPagePipeline(page: page, pixelWidth: pixelWidth, pixelHeight: pixelHeight)
             }
             status = "完成"
         } catch {
@@ -357,8 +419,84 @@ struct ContentView: View {
             blocks[i].rawOutput = result.rawOutput
             blocks[i].usedWiderContextRetry = result.usedWiderContextRetry
             blocks[i].firstAttemptRawOutput = result.firstAttemptRawOutput
+            blocks[i].source = .regionFallback
             // 走過重試才留寬裁圖縮圖,用來確認「寬裁圖到底裁到什麼」(範圍夠不夠、
             // 有沒有反而吃到隔壁分鏡),沒走重試就不佔記憶體。
+            if result.usedWiderContextRetry, let widerCrop {
+                widerCropPreviews[blocks[i].id] = UIImage(cgImage: widerCrop)
+            }
+        }
+        vlmEngine.finishPage()
+    }
+
+    /// 整頁引擎路線:整頁丟給 VLM 一次讀完 → 依閱讀順序把結果配回 Vision 的 bbox
+    /// → 沒配到的區塊自動退回逐塊路線。
+    ///
+    /// 「沒配到就退回」這個設計是刻意的保險:整頁路線整個失敗時,結果等於今天的
+    /// 行為,不可能比今天差——這是第六輪「為了救難字動全域 prompt、結果把原本翻對
+    /// 的句子搞壞」留下的教訓。
+    private func runVisionPagePipeline(page: UIImage, pixelWidth: Int, pixelHeight: Int) async throws {
+        guard let pageCG = page.cgImage else { return }
+
+        // 先把每塊的裁圖縮圖無條件備好(純 CGImage.cropping,不含推理,成本可忽略)。
+        // 整頁路線不會進逐塊迴圈,不先做的話除錯清單整排沒有縮圖,失去定位問題的能力。
+        var crops: [Int: CGImage] = [:]
+        for i in blocks.indices {
+            let rect = RegionCropper.padded(
+                blocks[i].pixelRect, pixelWidth: pixelWidth, pixelHeight: pixelHeight)
+            if let crop = RegionCropper.crop(page, toPixelRect: rect) {
+                crops[i] = crop
+                cropPreviews[blocks[i].id] = UIImage(cgImage: crop)
+            }
+        }
+
+        status = "整頁讀圖翻譯中…"
+        if let pageResult = try await vlmEngine.translatePage(
+            pageCG, expectedBlockCount: blocks.count,
+            from: sourceLanguage, to: targetLanguage) {
+
+            pageRawOutput = pageResult.rawOutput
+            pageItemCount = pageResult.items.count
+
+            // 數量必須完全相符才做順序對位。數量不符就整批退回逐塊,不做任何
+            // 猜測性對位——Vision 的 bbox 是回填唯一依據,把譯文綁到錯的框會變成
+            // 「看起來成功、其實是錯的」沉默失敗,比明確失敗更難發現、更貴。
+            if pageResult.items.count == blocks.count {
+                for i in blocks.indices {
+                    let item = pageResult.items[i]
+                    guard !item.isDegenerate, !item.translated.isEmpty else { continue }
+                    let score = PageOutputParser.similarity(
+                        PageOutputParser.fold(item.original),
+                        PageOutputParser.fold(blocks[i].visionText))
+                    guard score >= Self.pageMatchThreshold else { continue }
+
+                    blocks[i].recognizedText = item.original
+                    blocks[i].translatedText = item.translated
+                    blocks[i].rawOutput = item.rawSlice
+                    blocks[i].source = .wholePage
+                    blocks[i].matchedItemIndex = item.index
+                    blocks[i].matchScore = score
+                }
+            }
+        }
+
+        // 整頁沒填到的區塊退回逐塊路線(這段與 runVisionPipeline 完全相同)。
+        for i in blocks.indices where blocks[i].translatedText == nil {
+            guard let crop = crops[i] else { continue }
+            status = "整頁沒對到的區塊改用逐塊翻譯…"
+            let widerRect = RegionCropper.padded(
+                blocks[i].pixelRect, pixelWidth: pixelWidth, pixelHeight: pixelHeight,
+                padFractionX: 1.5, padFractionY: 4.0, minPadPixels: 60)
+            let widerCrop = RegionCropper.crop(page, toPixelRect: widerRect)
+
+            let result = try await vlmEngine.translateRegion(
+                crop, widerContext: widerCrop, from: sourceLanguage, to: targetLanguage)
+            blocks[i].recognizedText = result.recognizedText
+            blocks[i].translatedText = result.translatedText
+            blocks[i].rawOutput = result.rawOutput
+            blocks[i].usedWiderContextRetry = result.usedWiderContextRetry
+            blocks[i].firstAttemptRawOutput = result.firstAttemptRawOutput
+            blocks[i].source = .regionFallback
             if result.usedWiderContextRetry, let widerCrop {
                 widerCropPreviews[blocks[i].id] = UIImage(cgImage: widerCrop)
             }

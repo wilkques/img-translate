@@ -41,4 +41,30 @@ protocol ImageTranslationEngine {
         from source: String,
         to target: String
     ) async throws -> ImageRegionTranslation
+
+    /// 整頁一次讀完:模型看到完整的分鏡與對話框上下文,依閱讀順序列出頁面上所有
+    /// 文字的「原文 + 譯文」。
+    ///
+    /// 為什麼要有這條路線:裝機證據顯示同級甚至更小的模型(Gemma 4 E2B、Qwen3.5 4B)
+    /// 透過 Locally AI **看整張圖**就能正確讀出我們一直失敗的狀聲詞,而我們餵的是
+    /// 孤立的一小塊裁圖。八輪只調 prompt/溫度都無效之後,「模型看到多大範圍」才是
+    /// 真正沒被檢驗過的變因。
+    ///
+    /// 回傳值**不含座標**——座標永遠來自 Vision,呼叫端負責把清單配回 bbox。
+    /// 回傳 `nil` 代表這個引擎不支援整頁路線,呼叫端直接走逐塊路線。
+    func translatePage(
+        _ page: CGImage,
+        expectedBlockCount: Int,
+        from source: String,
+        to target: String
+    ) async throws -> ImagePageTranslation?
+}
+
+extension ImageTranslationEngine {
+    func translatePage(
+        _ page: CGImage,
+        expectedBlockCount: Int,
+        from source: String,
+        to target: String
+    ) async throws -> ImagePageTranslation? { nil }
 }
