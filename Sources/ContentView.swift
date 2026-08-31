@@ -303,8 +303,17 @@ struct ContentView: View {
             guard let crop = RegionCropper.crop(page, toPixelRect: cropRect) else { continue }
             cropPreviews[blocks[i].id] = UIImage(cgImage: crop)
 
+            // 只在 VLM 判定主要路線生成失敗時才會用到,同一位置但擴邊範圍大很多
+            // (整個對話框/分鏡),讓模型有機會靠上下文正確讀出孤立小裁圖讀不出來的字
+            // (裝機實測發現同一顆模型透過 Locally AI 看整張圖讀得出來,見
+            // `VLMTranslationEngine.translateRegion` 的說明)。
+            let widerRect = RegionCropper.padded(
+                blocks[i].pixelRect, pixelWidth: pixelWidth, pixelHeight: pixelHeight,
+                padFractionX: 1.5, padFractionY: 4.0, minPadPixels: 60)
+            let widerCrop = RegionCropper.crop(page, toPixelRect: widerRect)
+
             let result = try await vlmEngine.translateRegion(
-                crop, from: sourceLanguage, to: targetLanguage)
+                crop, widerContext: widerCrop, from: sourceLanguage, to: targetLanguage)
             blocks[i].recognizedText = result.recognizedText
             blocks[i].translatedText = result.translatedText
         }

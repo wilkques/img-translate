@@ -88,10 +88,15 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     /// 讀不出來就調 1024。
     private static let visionLongEdge: CGFloat = 768
 
+    /// retry 用更大的縮放目標,搭配 `widerContext`(範圍大很多的裁圖)——範圍變大了,
+    /// 縮放目標不跟著放大的話,目標文字反而會比緊裁版本更模糊。
+    private static let retryVisionLongEdge: CGFloat = 1024
+
     // MARK: - ImageTranslationEngine
 
     func translateRegion(
         _ region: CGImage,
+        widerContext: CGImage?,
         from source: String,
         to target: String
     ) async throws -> ImageRegionTranslation {
@@ -101,16 +106,21 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         let prompt = Self.makePrompt(source: sourceName, target: targetName)
 
         let raw = try await Self.generateOne(
-            image: region, prompt: prompt, container: container, parameters: generateParameters)
+            image: region, prompt: prompt, container: container,
+            parameters: generateParameters, resizeLongEdge: Self.visionLongEdge)
 
-        // 卡進重複迴圈的都是同一小撮「來源文字本身就重複字母」的難字,原地用一個完全
-        // 不要求逐字複誦原文的簡化 prompt 重試一次(見 makeRetryPrompt 註解)。
+        // 卡進重複迴圈的都是同一小撮「來源文字本身就重複字母」的難字。裝機實測發現
+        // 同樣的模型透過 Locally AI 看整張圖能正確讀出這些字,但我們裁太緊、只給
+        // 孤立的一小塊字時會卡生成迴圈——問題可能是「缺乏上下文」而不是 prompt
+        // 措辭,retry 改用範圍大很多的裁圖(涵蓋整個對話框/分鏡),搭配更大的縮放
+        // 目標補償變大的範圍,而不是繼續在同一張緊裁圖上換 prompt/溫度。
         if Self.isDegenerateOutput(raw) {
             let retryRaw = try await Self.generateOne(
-                image: region,
+                image: widerContext ?? region,
                 prompt: Self.makeRetryPrompt(target: targetName),
                 container: container,
-                parameters: retryParameters)
+                parameters: retryParameters,
+                resizeLongEdge: Self.retryVisionLongEdge)
             return Self.parse(retryRaw)
         }
 
@@ -164,15 +174,17 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     /// 原文」這一步——那正是卡迴圈的根源(來源文字本身重複字母極多),既然已經
     /// 判定原文讀不出來也沒關係(這種案例反正是狀聲詞,讀不出精確原文不影響回填
     /// 使用者看到的翻譯結果),retry 只要求一件事:直接給音譯,不要求對照原文。
+    /// 這次搭配的圖也換成範圍大很多的裁圖(見 `translateRegion`),所以額外提醒
+    /// 模型只翻譯圖中「那句喊叫/狀聲詞」,不要連分鏡裡其他文字或畫面內容一起講。
     private static func makeRetryPrompt(target: String) -> String {
         """
-        This image is one small text region cropped from a comic page. It is a shout or \
-        a sound effect written in a stylised hand-lettered bold font, possibly with many \
-        repeated letters (for example a scream).
+        This image is a panel from a comic page, shown with extra surrounding context. \
+        Somewhere in it is a shout or a sound effect written in a stylised hand-lettered \
+        bold font, possibly with many repeated letters (for example a scream).
 
-        Give a short, natural \(target) transliteration of the sound. Keep any repeated \
-        sound short (2-4 repeats is enough) — do not try to match the exact number of \
-        repeats in the image.
+        Give a short, natural \(target) transliteration of just that shout/sound effect \
+        (not any other text or the scene itself). Keep any repeated sound short (2-4 \
+        repeats is enough) — do not try to match the exact number of repeats in the image.
 
         Reply with exactly one line and nothing else, no explanation, no quotes:
         TRANSLATION: <the \(target) text>
@@ -185,14 +197,15 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         image: CGImage,
         prompt: String,
         container: ModelContainer,
-        parameters: GenerateParameters
+        parameters: GenerateParameters,
+        resizeLongEdge: CGFloat
     ) async throws -> String {
         // UserInput.Image 只有 .ciImage/.url/.array 三種 case,沒有 .uiImage,
         // 所以直接從 CGImage 包 CIImage。
         let ciImage = CIImage(cgImage: image)
 
         var processing = UserInput.Processing()
-        processing.resize = CGSize(width: Self.visionLongEdge, height: Self.visionLongEdge)
+        processing.resize = CGSize(width: resizeLongEdge, height: resizeLongEdge)
 
         // 跟純文字版唯一的差別:.user() 多帶 images:,外層多帶 processing:。
         // 圖片內容怎麼插進 chat template 是 Qwen3VLMessageGenerator/Qwen3VLProcessor
@@ -312,7 +325,8 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
                 image: Self.blankWarmupImage(),
                 prompt: "Reply with the single word OK.",
                 container: container,
-                parameters: GenerateParameters(maxTokens: 2, temperature: 0.0)
+                parameters: GenerateParameters(maxTokens: 2, temperature: 0.0),
+                resizeLongEdge: Self.visionLongEdge
             )
 
             await MainActor.run { self?.phase = .ready }

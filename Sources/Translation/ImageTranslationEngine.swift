@@ -19,8 +19,17 @@ struct ImageRegionTranslation {
 /// 介面刻意做成一次一塊、不是 `[CGImage] -> [Result]`:VLM 每塊要幾秒鐘,一次回傳
 /// 全部會讓使用者盯著空白畫面等很久。呼叫端自己 loop、每完成一塊就更新一次畫面。
 protocol ImageTranslationEngine {
+    /// - Parameters:
+    ///   - region: 緊貼文字的裁圖(擴邊後),主要路線用這張。
+    ///   - widerContext: 同一個位置、但擴邊範圍大很多的裁圖(涵蓋整個對話框/分鏡),
+    ///     只在主要路線判定生成失敗時的重試才用得到——見 `VLMTranslationEngine`
+    ///     裡的裝機實測記錄:同一顆模型透過 Locally AI 看整張圖能正確讀出文字,
+    ///     但我們裁太緊、只給孤立的一小塊字時會卡生成迴圈,問題可能出在「缺乏上下文」
+    ///     而不是 prompt 措辭。傳 `nil` 表示呼叫端沒有更大範圍可用,retry 就沿用
+    ///     `region`。
     func translateRegion(
         _ region: CGImage,
+        widerContext: CGImage?,
         from source: String,
         to target: String
     ) async throws -> ImageRegionTranslation
