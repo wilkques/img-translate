@@ -61,7 +61,7 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     /// ⚠️ 裝機實測歷程(第 3 輪):maxTokens 拉回 150 後,合併多行框不再被截斷,
     /// 但含大量重複字母的狀聲詞("UWAAA"、"GRRRRRRAAAAGH")本身就在提示模型「接下來
     /// 繼續重複同一個字」,Step 1 要求逐字複誦這種輸入時偶爾還是會卡進重複迴圈,被
-    /// `isDegenerateOutput` 抓到。這兩塊是裝機實測目前唯一還會卡住的案例,不值得把
+    /// 退化偵測抓到。這兩塊是裝機實測目前唯一還會卡住的案例,不值得把
     /// 常駐溫度整體拉高(會犧牲另外兩塊已經翻對的句子的穩定性)——改成只有偵測到
     /// 退化輸出時,原地重試一次、用更高溫度打散貪婪路徑。
     ///
@@ -119,12 +119,16 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
             image: region, prompt: prompt, container: container,
             parameters: generateParameters, resizeLongEdge: Self.visionLongEdge)
 
-        // 卡進重複迴圈的都是同一小撮「來源文字本身就重複字母」的難字。裝機實測發現
-        // 同樣的模型透過 Locally AI 看整張圖能正確讀出這些字,但我們裁太緊、只給
-        // 孤立的一小塊字時會卡生成迴圈——問題可能是「缺乏上下文」而不是 prompt
-        // 措辭,retry 改用範圍大很多的裁圖(涵蓋整個對話框/分鏡),搭配更大的縮放
-        // 目標補償變大的範圍,而不是繼續在同一張緊裁圖上換 prompt/溫度。
-        if Self.isDegenerateOutput(raw) {
+        // 重試的判斷依據改成「解析完之後救不救得回來」,不是「原始輸出有沒有重複」
+        // ——重複但收斂後仍然是好譯文的情況(例如「呀啊啊啊…」)現在會被救回來,
+        // 那種不需要、也不應該再花一次推理去重試。
+        let firstAttempt = Self.parse(raw)
+
+        // 真正救不回來的才重試。裝機實測發現同樣的模型透過 Locally AI 看整張圖能
+        // 正確讀出這些字,但我們裁太緊、只給孤立的一小塊字時會卡生成迴圈——所以
+        // retry 改用範圍大很多的裁圖(涵蓋整個對話框/分鏡),搭配更大的縮放目標
+        // 補償變大的範圍,而不是繼續在同一張緊裁圖上換 prompt/溫度。
+        if firstAttempt.translatedText == Self.failureMessage {
             let retryRaw = try await Self.generateOne(
                 image: widerContext ?? region,
                 prompt: Self.makeRetryPrompt(target: targetName),
@@ -134,10 +138,13 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
             var result = Self.parse(retryRaw)
             result.usedWiderContextRetry = true
             result.firstAttemptRawOutput = raw
+            // 重試也救不回來時,如果第一次至少讀到了原文,保留它——除錯清單上
+            // 「讀對但翻不出來」跟「連讀都讀不出來」是兩種完全不同的失敗,要分得出來。
+            if result.recognizedText.isEmpty { result.recognizedText = firstAttempt.recognizedText }
             return result
         }
 
-        return Self.parse(raw)
+        return firstAttempt
     }
 
     /// 整頁一次讀完(見 `ImageTranslationEngine.translatePage` 的說明)。
@@ -368,12 +375,10 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     /// ORIGINAL:/TRANSLATION: 標籤,原本的 fallback(抓不到就整段當譯文)會把這坨
     /// 垃圾直接顯示出來。加一道退化偵測,抓到就回傳明確的失敗訊息而不是垃圾文字,
     /// 除錯清單上至少看得出「這塊生成失敗」而不是誤以為翻譯結果就長這樣。
-    nonisolated static func parse(_ raw: String) -> ImageRegionTranslation {
-        if isDegenerateOutput(raw) {
-            return ImageRegionTranslation(
-                recognizedText: "", translatedText: "[生成失敗:輸出異常重複]", rawOutput: raw)
-        }
+    /// 生成失敗時顯示的訊息。也當成「這次要不要重試」的判斷依據。
+    static let failureMessage = "[生成失敗:輸出異常重複]"
 
+    nonisolated static func parse(_ raw: String) -> ImageRegionTranslation {
         var original = ""
         var translated = ""
 
@@ -386,30 +391,36 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
             }
         }
 
+        // ⚠️ 裝機實測(第九輪)抓到的關鍵事實:模型有時候**讀對也翻對了**,只是重複
+        // 次數失控——底部吼叫聲那塊輸出的是 `TRANSLATION: 呀啊啊啊…(共 180 字)`。
+        // 「呀啊啊啊」本來就是合格的漫畫吼叫聲譯文,舊版卻因為整段命中退化偵測就把
+        // 整項丟掉、顯示失敗訊息,等於把好結果當垃圾扔。改成先收斂重複次數再判斷。
+        if PageOutputParser.isDegenerateLine(translated) {
+            translated = PageOutputParser.collapseRepeats(translated)
+        }
+        original = PageOutputParser.collapseRepeats(original)
+
         if translated.isEmpty {
-            translated = raw
+            let fallback = raw
                 .replacingOccurrences(of: "```", with: "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
+            translated = PageOutputParser.isDegenerateLine(fallback)
+                ? PageOutputParser.collapseRepeats(fallback)
+                : fallback
+        }
+
+        // 收斂之後還是沒有任何文字內容(例如整段只剩一堆 `¡` 或 `!!!`)才算真的失敗。
+        guard PageOutputParser.hasUsableContent(translated) else {
+            return ImageRegionTranslation(
+                recognizedText: original, translatedText: failureMessage, rawOutput: raw)
         }
         return ImageRegionTranslation(recognizedText: original, translatedText: translated, rawOutput: raw)
     }
 
-    /// 同一個非空白字元連續出現超過這個次數,判定生成卡進重複迴圈了。
-    /// 一般正常語句(包含中文疊字、西班牙文重複字母的狀聲詞)不會連續重複這麼多次。
-    private nonisolated static func isDegenerateOutput(_ raw: String, threshold: Int = 12) -> Bool {
-        var runLength = 0
-        var previous: Character?
-        for ch in raw where !ch.isWhitespace {
-            if ch == previous {
-                runLength += 1
-                if runLength >= threshold { return true }
-            } else {
-                runLength = 1
-            }
-            previous = ch
-        }
-        return false
-    }
+    // 註:原本這裡有一份 `isDegenerateOutput`(整段判斷、命中就整個丟掉)。
+    // 現在退化判斷統一由 `PageOutputParser.isDegenerateLine` 負責(逐行判斷),
+    // 而且命中之後是先 `collapseRepeats` 收斂重複次數搶救,不是直接丟掉——
+    // 裝機實測證明被丟掉的輸出裡有讀對也翻對的好結果。
 
     // MARK: - 載入(含下載)
 

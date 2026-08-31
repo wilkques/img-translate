@@ -31,8 +31,14 @@ enum PageOutputParser {
         func flush() {
             guard var item = pending else { return }
             item.rawSlice = pendingLines.joined(separator: "\n")
-            let translated = item.translated.trimmingCharacters(in: .whitespaces)
-            item.isDegenerate = translated.isEmpty || isDegenerateLine(translated)
+
+            // 重複失控但內容其實是對的 → 收斂重複次數後照用,不要整項丟掉。
+            var translated = item.translated.trimmingCharacters(in: .whitespaces)
+            if isDegenerateLine(translated) { translated = collapseRepeats(translated) }
+            item.translated = translated
+            item.original = collapseRepeats(item.original)
+            item.isDegenerate = !hasUsableContent(translated)
+
             item.order = items.count
             items.append(item)
             pending = nil
@@ -112,6 +118,36 @@ enum PageOutputParser {
             previous = ch
         }
         return false
+    }
+
+    // MARK: - 搶救重複過頭的輸出
+
+    /// 把連續重複超過 `maxRun` 次的字元收斂到 `maxRun` 次。
+    ///
+    /// 為什麼要有這個:裝機實測抓到模型其實**讀對也翻對了**,只是重複次數失控——
+    /// 底部吼叫聲那塊的輸出是 `TRANSLATION: 呀啊啊啊…(共 180 字)`,「呀啊啊啊」
+    /// 本來就是完全合格的漫畫吼叫聲譯文,卻因為後面拖了 170 幾個「啊」被退化偵測
+    /// 判定為失敗、整個丟掉。與其把好結果當垃圾扔,不如收斂重複次數後拿來用。
+    static func collapseRepeats(_ s: String, maxRun: Int = 3) -> String {
+        var out = ""
+        var previous: Character?
+        var run = 0
+        for ch in s {
+            if ch == previous {
+                run += 1
+            } else {
+                run = 1
+                previous = ch
+            }
+            if run <= maxRun { out.append(ch) }
+        }
+        return out
+    }
+
+    /// 收斂之後還剩不剩下有意義的內容。純標點(例如整段只剩 `¡` 或 `!!!`)不算,
+    /// 那種是真的沒救,顯示明確的失敗訊息比顯示一坨符號有用。
+    static func hasUsableContent(_ s: String) -> Bool {
+        s.contains { $0.isLetter || $0.isNumber }
     }
 
     // MARK: - 對位
