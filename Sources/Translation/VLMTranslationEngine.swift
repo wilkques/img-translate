@@ -64,9 +64,17 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     /// `isDegenerateOutput` 抓到。這兩塊是裝機實測目前唯一還會卡住的案例,不值得把
     /// 常駐溫度整體拉高(會犧牲另外兩塊已經翻對的句子的穩定性)——改成只有偵測到
     /// 退化輸出時,原地重試一次、用更高溫度打散貪婪路徑。
+    ///
+    /// ⚠️ 裝機實測歷程(第 6 輪,意外發現):曾經測到「先翻譯再讀原文」+ temperature
+    /// 0.2(也就是跟 `generateParameters` 一樣的溫度)這個組合,難字唯一一次生出
+    /// 乾淨、不卡迴圈的輸出(雖然翻譯內容本身錯了,但沒有卡進字元重複)。反而後續
+    /// 用 0.7 重試(不管是原本兩步驟 prompt 還是拿掉讀原文的簡化 prompt)每次都還是
+    /// 卡迴圈。跟一般直覺(拉高溫度=打散貪婪路徑)相反的證據——對這顆 4-bit 小模型
+    /// 在這種輸入上,0.7 看起來是在**加重**卡迴圈,不是緩解。retry 溫度改回 0.2,
+    /// 只靠「拿掉讀原文步驟、縮短生成長度」這個變因來降低卡迴圈機率。
     private let retryParameters = GenerateParameters(
         maxTokens: 150,
-        temperature: 0.7
+        temperature: 0.2
     )
 
     /// 送進 VLM 前把裁切圖的長邊縮放到這個尺寸。
