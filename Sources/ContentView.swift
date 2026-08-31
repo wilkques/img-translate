@@ -10,6 +10,8 @@ struct ContentView: View {
 
     @State private var blocks: [TextBlock] = []
     @State private var cropPreviews: [UUID: UIImage] = [:]
+    /// 只有走過寬範圍裁圖重試的區塊才有,用來確認重試實際看到的圖長什麼樣。
+    @State private var widerCropPreviews: [UUID: UIImage] = [:]
     @State private var showTranslated = true
     @State private var status = "準備中…"
     @State private var imageSize: CGSize = .zero
@@ -209,32 +211,67 @@ struct ContentView: View {
     /// 顯示裁圖縮圖 + Vision 辨識原文 + VLM 讀到的原文 + 譯文,方便判斷卡在
     /// 「框抓錯」「裁歪/裁太緊」「VLM 讀錯」「翻錯」哪一步(文字引擎沒有裁圖/VLM
     /// 讀字這兩欄,對應顯示空白)。
+    ///
+    /// 生成失敗的區塊額外顯示「有沒有走重試、重試看到多寬的圖、兩次生成的原始輸出」
+    /// ——先前好幾輪裝機測試,主要路線失敗跟重試也失敗在畫面上長得一模一樣,等於
+    /// 沒有資訊可以判斷該往哪個方向修,只能瞎猜 prompt/參數。
     private var debugList: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 8) {
                 ForEach(blocks) { block in
                     HStack(alignment: .top, spacing: 8) {
-                        if let crop = cropPreviews[block.id] {
-                            Image(uiImage: crop)
-                                .resizable()
-                                .scaledToFit()
-                                .frame(width: 90, height: 44)
-                                .border(.gray)
+                        VStack(spacing: 2) {
+                            if let crop = cropPreviews[block.id] {
+                                Image(uiImage: crop)
+                                    .resizable()
+                                    .scaledToFit()
+                                    .frame(width: 90, height: 44)
+                                    .border(.gray)
+                            }
+                            if let wider = widerCropPreviews[block.id] {
+                                Image(uiImage: wider)
+                                    .resizable()
+                                    .scaledToFit()
+                                    .frame(width: 90, height: 60)
+                                    .border(.orange)
+                            }
                         }
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Vision:\(block.visionText)")
-                            if let recognized = block.recognizedText {
+                            if let recognized = block.recognizedText, !recognized.isEmpty {
                                 Text("VLM讀到:\(recognized)")
                             }
                             Text("譯文:\(block.translatedText ?? "…")")
+
+                            if block.usedWiderContextRetry {
+                                Text("↻ 已走寬裁圖重試(橘框=重試看到的圖)")
+                                    .foregroundStyle(.orange)
+                                if let first = block.firstAttemptRawOutput {
+                                    Text("第1次原始輸出:\(Self.debugTruncated(first))")
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            if let raw = block.rawOutput {
+                                Text("\(block.usedWiderContextRetry ? "重試" : "")原始輸出:\(Self.debugTruncated(raw))")
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                         .font(.system(.caption2, design: .monospaced))
+                        .textSelection(.enabled)
                     }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(height: 220)
+        .frame(height: 300)
+    }
+
+    /// 卡進重複迴圈的原始輸出可能長達上百字元,全部顯示會把清單撐爆,
+    /// 但要看得出「是重複迴圈還是別的失敗」,所以留頭尾各一段。
+    private static func debugTruncated(_ text: String, head: Int = 60, tail: Int = 20) -> String {
+        let flat = text.replacingOccurrences(of: "\n", with: "⏎")
+        guard flat.count > head + tail + 5 else { return flat }
+        return "\(flat.prefix(head))…(共\(flat.count)字)…\(flat.suffix(tail))"
     }
 
     private func runPipeline() async {
@@ -253,6 +290,7 @@ struct ContentView: View {
         let pixelHeight = cg.height
         imageSize = CGSize(width: pixelWidth, height: pixelHeight)
         cropPreviews = [:]
+        widerCropPreviews = [:]
 
         status = "OCR 定位中…"
         do {
@@ -316,6 +354,14 @@ struct ContentView: View {
                 crop, widerContext: widerCrop, from: sourceLanguage, to: targetLanguage)
             blocks[i].recognizedText = result.recognizedText
             blocks[i].translatedText = result.translatedText
+            blocks[i].rawOutput = result.rawOutput
+            blocks[i].usedWiderContextRetry = result.usedWiderContextRetry
+            blocks[i].firstAttemptRawOutput = result.firstAttemptRawOutput
+            // 走過重試才留寬裁圖縮圖,用來確認「寬裁圖到底裁到什麼」(範圍夠不夠、
+            // 有沒有反而吃到隔壁分鏡),沒走重試就不佔記憶體。
+            if result.usedWiderContextRetry, let widerCrop {
+                widerCropPreviews[blocks[i].id] = UIImage(cgImage: widerCrop)
+            }
         }
         vlmEngine.finishPage()
     }

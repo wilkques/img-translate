@@ -121,7 +121,10 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
                 container: container,
                 parameters: retryParameters,
                 resizeLongEdge: Self.retryVisionLongEdge)
-            return Self.parse(retryRaw)
+            var result = Self.parse(retryRaw)
+            result.usedWiderContextRetry = true
+            result.firstAttemptRawOutput = raw
+            return result
         }
 
         return Self.parse(raw)

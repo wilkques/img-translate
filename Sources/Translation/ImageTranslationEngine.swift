@@ -8,6 +8,14 @@ struct ImageRegionTranslation {
     var translatedText: String
     /// 模型原始輸出,格式解析失敗時用來看發生什麼事
     var rawOutput: String
+    /// 有沒有走過「寬範圍裁圖」的重試路線。
+    ///
+    /// 這個欄位存在的理由:先前連續好幾輪裝機測試,不管是主要路線失敗還是重試也
+    /// 失敗,畫面上都只顯示同一句「[生成失敗:輸出異常重複]」,完全看不出重試到底
+    /// 有沒有跑、跑出什麼——等於在沒有資訊的情況下改 prompt/參數瞎猜。
+    var usedWiderContextRetry: Bool = false
+    /// 走過重試時,主要路線(緊裁圖)那次的原始輸出,用來跟重試的輸出對照。
+    var firstAttemptRawOutput: String?
 }
 
 /// 讀圖翻譯引擎的介面。
