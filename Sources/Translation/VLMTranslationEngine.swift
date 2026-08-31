@@ -92,14 +92,18 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         let container = try await ensureLoaded()
         let prompt = Self.makePrompt(source: sourceName, target: targetName)
 
-        var raw = try await Self.generateOne(
+        let raw = try await Self.generateOne(
             image: region, prompt: prompt, container: container, parameters: generateParameters)
 
-        // 卡進重複迴圈的都是同一小撮「來源文字本身就重複字母」的難字,原地用更高溫度
-        // 重試一次,不用常駐拉高溫度、不影響已經翻對的正常句子。
+        // 卡進重複迴圈的都是同一小撮「來源文字本身就重複字母」的難字,原地用一個完全
+        // 不要求逐字複誦原文的簡化 prompt 重試一次(見 makeRetryPrompt 註解)。
         if Self.isDegenerateOutput(raw) {
-            raw = try await Self.generateOne(
-                image: region, prompt: prompt, container: container, parameters: retryParameters)
+            let retryRaw = try await Self.generateOne(
+                image: region,
+                prompt: Self.makeRetryPrompt(target: targetName),
+                container: container,
+                parameters: retryParameters)
+            return Self.parse(retryRaw)
         }
 
         return Self.parse(raw)
@@ -121,30 +125,49 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     /// - 要求輸出兩行(ORIGINAL/TRANSLATION):補上「判斷是辨識錯還是翻譯錯」的
     ///   除錯需求,成本只有幾個 token
     ///
-    /// ⚠️ 裝機實測歷程:原本 Step 1 讀原文、Step 2 才翻譯——結果對重複字母極多的
-    /// 狀聲詞(UWAAA/GRRRRRRAAAAGH),模型會把 token 額度耗在複誦原文上,兩輪修法
-    /// (放寬「精確複誦」要求、失敗時重試拉高溫度)都沒解決,因為問題不是措辭,是
-    /// **順序**——只要 TRANSLATION 排在 ORIGINAL 後面,模型卡在複誦原文時翻譯永遠
-    /// 生不出來。改成**先要求 TRANSLATION、ORIGINAL 放第二行**:就算模型後面卡在
-    /// 複誦原文的重複字母,真正需要的譯文已經先寫出來了。`parse()` 本來就是逐行找
-    /// 兩個標籤、不假設順序,不用改。
+    /// ⚠️ 裝機實測歷程:曾經試過把 TRANSLATION 排到 ORIGINAL 前面,理論上是想讓
+    /// 模型卡在複誦原文時至少先寫出翻譯——裝機驗證**反而更差**:不只兩個難字沒被
+    /// 救到(其中一個變成把原文原封不動當「譯文」吐回來),連原本穩定翻對的兩句
+    /// 正常句子都被这個改動搞壞(輸出變成截斷的 "TRANSLA..." 或譯文跟原文黏在一起)。
+    /// 判斷是先讀原文再翻譯這個「兩步驟」本身在助攻正常句子的翻譯品質,問題只出在
+    /// 兩個重複字母極端多的難字上——所以**改回原本驗證過穩定的順序**,難字改交給
+    /// 下面 `makeRetryPrompt` 這個完全不同、更簡化的 retry-only prompt 處理,不動
+    /// 這個已經驗證過對一般句子有效的主要 prompt。
     private static func makePrompt(source: String, target: String) -> String {
         """
         This image is one small text region cropped from a comic page. The text is \
         written in \(source), in a stylised hand-lettered bold font. It may be a sound \
         effect or a shout rather than a real word.
 
-        Step 1. Translate the text into \(target). If it is a sound effect or a scream, \
-        transliterate the sound into \(target) instead of translating its literal meaning. \
-        Keep any repeated sound short and natural (2-4 repeats is enough), do not try to \
-        match the exact number of repeats in the image.
-        Step 2. Read the original text as it is drawn, for reference. Keep punctuation and \
-        inverted marks (¡ ¿), do not correct it into a real word, and likewise keep any \
-        repeated letters to a short natural amount (2-4 repeats) instead of the exact count.
+        Step 1. Read the text as it is drawn. Keep punctuation and inverted marks (¡ ¿). \
+        Do not correct it into a real word. If a letter is repeated many times (a long \
+        scream or sound effect), do NOT try to count the exact number of repeats — just \
+        write a short natural amount (2-4 repeats is enough) and move on to Step 2.
+        Step 2. Translate it into \(target). If it is a sound effect or a scream, \
+        transliterate the sound into \(target) instead of translating its literal meaning.
 
         Reply with exactly two lines and nothing else, no explanation, no quotes:
-        TRANSLATION: <the \(target) text>
         ORIGINAL: <the text you read>
+        TRANSLATION: <the \(target) text>
+        """
+    }
+
+    /// 只在主要 prompt 判定退化輸出(卡進重複迴圈)之後才用。刻意拿掉「逐字讀出
+    /// 原文」這一步——那正是卡迴圈的根源(來源文字本身重複字母極多),既然已經
+    /// 判定原文讀不出來也沒關係(這種案例反正是狀聲詞,讀不出精確原文不影響回填
+    /// 使用者看到的翻譯結果),retry 只要求一件事:直接給音譯,不要求對照原文。
+    private static func makeRetryPrompt(target: String) -> String {
+        """
+        This image is one small text region cropped from a comic page. It is a shout or \
+        a sound effect written in a stylised hand-lettered bold font, possibly with many \
+        repeated letters (for example a scream).
+
+        Give a short, natural \(target) transliteration of the sound. Keep any repeated \
+        sound short (2-4 repeats is enough) — do not try to match the exact number of \
+        repeats in the image.
+
+        Reply with exactly one line and nothing else, no explanation, no quotes:
+        TRANSLATION: <the \(target) text>
         """
     }
 
