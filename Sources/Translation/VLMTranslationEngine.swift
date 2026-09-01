@@ -72,8 +72,18 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     /// 卡迴圈。跟一般直覺(拉高溫度=打散貪婪路徑)相反的證據——對這顆 4-bit 小模型
     /// 在這種輸入上,0.7 看起來是在**加重**卡迴圈,不是緩解。retry 溫度改回 0.2,
     /// 只靠「拿掉讀原文步驟、縮短生成長度」這個變因來降低卡迴圈機率。
+    ///
+    /// ⚠️ 裝機實測(2026-09-01,retry 改餵整頁圖之後):把 `widerContext` 直接換成
+    /// 整頁原圖後,retry 對頂部難字還是整段空轉純 `¡` 符號,跟裁圖範圍大小無關
+    /// (範圍已經跟整頁路線完全一樣)。但整頁路線(`pageGenerateParameters`,
+    /// `maxTokens: 512`)用同一張圖至少讀到了實質內容,retry 這裡的 `maxTokens`
+    /// 只有 150——如果模型一開始生成就卡進重複,150 token 的額度可能撐不到它脫離
+    /// 卡頓、走回正常吐字,512 的整頁路線才有機會撐過去。retry prompt
+    /// (`makeRetryPrompt`)其實比整頁 prompt 簡單(只要求一行 TRANSLATION),照理
+    /// 該更容易成功,結果卻更差,額度不夠很可能就是原因。拉到跟整頁路線一樣的
+    /// 512,測試「額度」這一個變因,不動 prompt 或圖片範圍。
     private let retryParameters = GenerateParameters(
-        maxTokens: 150,
+        maxTokens: 512,
         temperature: 0.2
     )
 
