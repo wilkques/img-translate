@@ -73,10 +73,12 @@ enum LocalModelStore {
     }
 
     /// 判斷某個模型的權重是否已經下載到本機快取(給「下載/移除」按鈕判斷要顯示
-    /// 哪一種)。`ModelConfiguration.id` 是 `.id(String)`(HuggingFace repo)或
-    /// `.directory(URL)`(本機路徑)兩種,只有前者需要、也才能查快取。
+    /// 哪一種)。`ModelConfiguration.id` 是 `.id(String, revision: String)`
+    /// (HuggingFace repo,裝機編譯才發現實際帶兩個關聯值,不是單一 String)或
+    /// `.directory(URL)`(本機路徑)兩種,只有前者需要、也才能查快取,revision
+    /// 這裡用不到。
     static func isModelDownloaded(_ configuration: ModelConfiguration) -> Bool {
-        guard case .id(let repoId) = configuration.id else { return false }
+        guard case .id(let repoId, revision: _) = configuration.id else { return false }
         let snapshotsDir = repoDirectory(for: repoId).appendingPathComponent("snapshots")
         guard let contents = try? FileManager.default.contentsOfDirectory(
             at: snapshotsDir, includingPropertiesForKeys: nil) else { return false }
@@ -87,7 +89,7 @@ enum LocalModelStore {
     /// 這顆模型目前沒有被載入使用中(`VLMTranslationEngine.removeDownload(of:)`
     /// 會先 `unload()` 再呼叫這個)。
     static func removeModel(_ configuration: ModelConfiguration) throws {
-        guard case .id(let repoId) = configuration.id else { return }
+        guard case .id(let repoId, revision: _) = configuration.id else { return }
         try FileManager.default.removeItem(at: repoDirectory(for: repoId))
     }
 }
