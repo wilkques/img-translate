@@ -423,7 +423,17 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         }
         original = PageOutputParser.collapseRepeats(original)
 
-        if translated.isEmpty {
+        // ⚠️ 裝機實測發現的 bug:這個 fallback 原本不管 `original` 有沒有解析到值,
+        // 只要 `translated` 是空的就把「整段原始輸出(還包含 `ORIGINAL:` 這個標籤
+        // 字樣)」當成譯文候補。難字卡在複誦原文階段、只寫出 `ORIGINAL: ¡¡¡¡¡¡...`
+        // 完全沒寫到 `TRANSLATION:` 的案例,`ORIGINAL` 這幾個字母讓下面的
+        // `hasUsableContent` 誤判「有內容」,導致函式不回傳 `failureMessage`——
+        // 寬裁圖 retry(靠比對 `translatedText == failureMessage` 觸發)因此從來沒有
+        // 機會執行。只有在 `original` 也是空的(模型整段沒照格式、裸寫一般文字)才
+        // 適合把整段原始輸出當譯文救回來;`original` 有值但 `translated` 沒有,代表
+        // 模型卡在讀原文階段,`translated` 要保持空字串,才能讓下面的
+        // `hasUsableContent` 正確判定失敗、真正觸發 retry。
+        if translated.isEmpty && original.isEmpty {
             let fallback = raw
                 .replacingOccurrences(of: "```", with: "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
