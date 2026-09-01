@@ -148,7 +148,7 @@ final class LocalLLMTranslationEngine: ObservableObject, TranslationEngine {
                     needed: Self.approximateDownloadBytes, available: available)
             }
 
-            let downloader = HubSnapshotDownloader(try LocalModelStore.makeHubClient())
+            let downloader = HubSnapshotDownloader(try LocalModelStore.makeHubClient(purpose: "text"))
             let tokenizerLoader = HuggingFaceTokenizerLoader()
 
             await MainActor.run { self?.phase = .downloading(0) }

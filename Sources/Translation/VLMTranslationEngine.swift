@@ -535,7 +535,7 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
                     needed: approximateDownloadBytes, available: available)
             }
 
-            let downloader = HubSnapshotDownloader(try LocalModelStore.makeHubClient())
+            let downloader = HubSnapshotDownloader(try LocalModelStore.makeHubClient(purpose: "vlm"))
             let tokenizerLoader = HuggingFaceTokenizerLoader()
 
             await MainActor.run { self?.phase = .downloading(0) }

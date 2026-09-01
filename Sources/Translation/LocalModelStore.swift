@@ -32,19 +32,42 @@ enum LocalModelStore {
         return dir
     }
 
-    static func makeHubClient() throws -> HubClient {
+    /// ⚠️ 2026-09-01:改用背景 `URLSession`,讓下載能撐過「app 被切到背景/
+    /// 鎖螢幕」——這是目前為止唯一沒辦法在裝機前確認會不會生效的改動:
+    /// `HubClient`(`swift-huggingface`)拿到這個 session 之後內部到底怎麼用
+    /// 無法從原始碼確認,理論上有三種結果:(a) 真的沿用背景 session,下載撐
+    /// 得過去;(b) 內部另外建立自己的 session,這個設定沒被用到;(c) 內部用
+    /// `session.data(for:)`/`download(for:)` 這類 async 便利方法對背景
+    /// session 呼叫會直接丟例外崩潰,而且編譯抓不到。裝機下載到一半切背景
+    /// 測過才知道是哪一種——這輪範圍只保證「切背景/鎖螢幕但沒被強制關閉」,
+    /// 使用者從切換器滑掉或系統記憶體壓力砍掉 process 這種更極端的情境,
+    /// `HubClient` 沒有公開的「重新接上一半下載」API,不在這輪範圍內。
+    ///
+    /// `purpose` 帶進 session identifier 裡,只是為了讓 `VLMTranslationEngine`
+    /// 跟 `LocalLLMTranslationEngine` 兩邊各自呼叫這個函式時不要撞成同一個
+    /// identifier——背景 session 的 identifier 同一時間只能對應一個活躍
+    /// session,兩顆引擎理論上不會同時下載(`ContentView` 切引擎時會
+    /// `unload()` 沒在用的那個),但沒有壞處,順手避開。
+    static func makeHubClient(purpose: String) throws -> HubClient {
         let dir = try prepareDirectory()
 
         // waitsForConnectivity:沒網路時等待而不是立刻失敗;
         // timeoutIntervalForResource 放大到 2 小時,避免大檔下載被整體逾時砍掉。
-        let configuration = URLSessionConfiguration.default
+        let configuration = URLSessionConfiguration.background(
+            withIdentifier: "dev.cyril.imgtranslate.modeldownload.\(purpose)")
         configuration.timeoutIntervalForRequest = 60
         configuration.timeoutIntervalForResource = 60 * 60 * 2
         configuration.waitsForConnectivity = true
         configuration.allowsExpensiveNetworkAccess = true
+        configuration.sessionSendsLaunchEvents = true
+        configuration.isDiscretionary = false   // 使用者主動按下載,不要讓系統自己挑時機才開始
 
         return HubClient(
-            session: URLSession(configuration: configuration),
+            session: URLSession(
+                configuration: configuration,
+                delegate: BackgroundSessionDelegate(),
+                delegateQueue: nil
+            ),
             userAgent: "ImgTranslate/1.0",
             cache: HubCache(cacheDirectory: dir)
         )
@@ -91,5 +114,18 @@ enum LocalModelStore {
     static func removeModel(_ configuration: ModelConfiguration) throws {
         guard case .id(let repoId, revision: _) = configuration.id else { return }
         try FileManager.default.removeItem(at: repoDirectory(for: repoId))
+    }
+}
+
+/// 只負責滿足背景 session 的生命週期合約——收到「這個 session 的所有背景
+/// 事件都處理完了」通知,呼叫系統要求的 completion handler(`AppDelegate`
+/// 存起來的那個)。真正的下載進度/完成邏輯已經在 `HubClient` 內部處理,這裡
+/// 不重複實作,也不試圖攔截/重新實作下載本身。
+final class BackgroundSessionDelegate: NSObject, URLSessionDelegate {
+    func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        DispatchQueue.main.async {
+            AppDelegate.backgroundSessionCompletionHandler?()
+            AppDelegate.backgroundSessionCompletionHandler = nil
+        }
     }
 }
