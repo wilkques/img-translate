@@ -417,17 +417,17 @@ struct ContentView: View {
             // (整個對話框/分鏡),讓模型有機會靠上下文正確讀出孤立小裁圖讀不出來的字
             // (裝機實測發現同一顆模型透過 Locally AI 看整張圖讀得出來,見
             // `VLMTranslationEngine.translateRegion` 的說明)。
-            // ⚠️ 裝機實測(修 parse() bug 後這輪,retry 第一次真的跑到):範圍
-            // 1.5/4.0 擴邊後 retry 還是整段卡進純 `¡` 迴圈,完全沒讀到內容,而整頁
-            // 路線(給模型看整張頁面)同一塊文字至少讀到了實質內容——代表這個範圍
-            // 對這塊還是不夠寬。拉大到 2.5/6.0。`padded()` 最後會夾回頁面邊界,
-            // 貼近頁緣的區塊(例如頁面最上方的區塊)擴邊往外的部分可能提早被夾掉,
-            // 實際擴大的效果不保證跟倍數成正比——裝機後看橘框縮圖的實際範圍才知道
-            // 這次有沒有真的擴大,不能只看這行參數。
-            let widerRect = RegionCropper.padded(
-                blocks[i].pixelRect, pixelWidth: pixelWidth, pixelHeight: pixelHeight,
-                padFractionX: 2.5, padFractionY: 6.0, minPadPixels: 80)
-            let widerCrop = RegionCropper.crop(page, toPixelRect: widerRect)
+            // ⚠️ 裝機實測(拉大擴邊倍數到 2.5/6.0 這輪):橘框縮圖範圍跟前一輪
+            // (1.5/4.0)幾乎沒變,兩次原始輸出字數也完全相同(157字/150字)——證實
+            // `RegionCropper.padded()` 的 `.intersection(bounds)` 邊界夾限先擋住了:
+            // 這塊貼著頁面最上緣,擴邊往上的部分早就被夾掉,倍數再怎麼調對它都是
+            // 無效改動。靠倍數擴邊逼近整頁範圍這條路走不通,改成 retry 直接餵整頁圖,
+            // 不再透過 `RegionCropper.padded()` 算範圍。這也是最乾淨的對照實驗:
+            // 整頁路線已經證明模型看整張頁面時,這塊文字至少讀得到實質內容
+            // (`¡LUWA! ¡¡LUWAA!!!`),如果 retry 用整頁圖還是吐純 `¡` 符號,代表
+            // 差異不在「看多寬」,是整頁 prompt 跟 retry prompt 的措辭差異,「範圍
+            // 是關鍵」這個假設就該被推翻,要往別的方向查。
+            let widerCrop = page.cgImage
 
             let result = try await vlmEngine.translateRegion(
                 crop, widerContext: widerCrop, from: sourceLanguage, to: targetLanguage)
@@ -501,17 +501,17 @@ struct ContentView: View {
         for i in blocks.indices where blocks[i].translatedText == nil {
             guard let crop = crops[i] else { continue }
             status = "整頁沒對到的區塊改用逐塊翻譯…"
-            // ⚠️ 裝機實測(修 parse() bug 後這輪,retry 第一次真的跑到):範圍
-            // 1.5/4.0 擴邊後 retry 還是整段卡進純 `¡` 迴圈,完全沒讀到內容,而整頁
-            // 路線(給模型看整張頁面)同一塊文字至少讀到了實質內容——代表這個範圍
-            // 對這塊還是不夠寬。拉大到 2.5/6.0。`padded()` 最後會夾回頁面邊界,
-            // 貼近頁緣的區塊(例如頁面最上方的區塊)擴邊往外的部分可能提早被夾掉,
-            // 實際擴大的效果不保證跟倍數成正比——裝機後看橘框縮圖的實際範圍才知道
-            // 這次有沒有真的擴大,不能只看這行參數。
-            let widerRect = RegionCropper.padded(
-                blocks[i].pixelRect, pixelWidth: pixelWidth, pixelHeight: pixelHeight,
-                padFractionX: 2.5, padFractionY: 6.0, minPadPixels: 80)
-            let widerCrop = RegionCropper.crop(page, toPixelRect: widerRect)
+            // ⚠️ 裝機實測(拉大擴邊倍數到 2.5/6.0 這輪):橘框縮圖範圍跟前一輪
+            // (1.5/4.0)幾乎沒變,兩次原始輸出字數也完全相同(157字/150字)——證實
+            // `RegionCropper.padded()` 的 `.intersection(bounds)` 邊界夾限先擋住了:
+            // 這塊貼著頁面最上緣,擴邊往上的部分早就被夾掉,倍數再怎麼調對它都是
+            // 無效改動。靠倍數擴邊逼近整頁範圍這條路走不通,改成 retry 直接餵整頁圖,
+            // 不再透過 `RegionCropper.padded()` 算範圍。這也是最乾淨的對照實驗:
+            // 整頁路線已經證明模型看整張頁面時,這塊文字至少讀得到實質內容
+            // (`¡LUWA! ¡¡LUWAA!!!`),如果 retry 用整頁圖還是吐純 `¡` 符號,代表
+            // 差異不在「看多寬」,是整頁 prompt 跟 retry prompt 的措辭差異,「範圍
+            // 是關鍵」這個假設就該被推翻,要往別的方向查。
+            let widerCrop = page.cgImage
 
             let result = try await vlmEngine.translateRegion(
                 crop, widerContext: widerCrop, from: sourceLanguage, to: targetLanguage)
