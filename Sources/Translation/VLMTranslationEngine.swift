@@ -75,6 +75,10 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
 
     @Published private(set) var phase: Phase = .idle
     @Published var selectedModel: VLMModelOption = .qwen3VL4B
+    /// 每個選項有沒有下載過,給「下載/移除」按鈕判斷要顯示哪一種。掃檔案系統有
+    /// 成本,不即時輪詢——只在真的可能改變(app 啟動、下載完成、移除之後)才
+    /// 呼叫 `refreshDownloadedModels()` 重新掃一次。
+    @Published private(set) var downloadedModels: Set<VLMModelOption> = []
 
     private var container: ModelContainer?
     private var loadTask: Task<ModelContainer, Error>?
@@ -560,7 +564,10 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
                 resizeLongEdge: Self.visionLongEdge
             )
 
-            await MainActor.run { self?.phase = .ready }
+            await MainActor.run {
+                self?.phase = .ready
+                self?.refreshDownloadedModels()
+            }
             return container
         }
 
@@ -603,5 +610,20 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         guard option != selectedModel else { return }
         unload()
         selectedModel = option
+    }
+
+    /// 掃一次本機快取,更新每個選項「有沒有下載過」。呼叫端(ContentView)在
+    /// app 啟動時呼叫一次,`ensureLoaded()` 下載/載入完成時也會自動呼叫。
+    func refreshDownloadedModels() {
+        downloadedModels = Set(
+            VLMModelOption.allCases.filter { LocalModelStore.isModelDownloaded($0.configuration) })
+    }
+
+    /// 移除某個選項在本機的權重檔。如果正好是目前載入中的那顆,先 `unload()`
+    /// 再刪,避免砍掉還在使用中的檔案。
+    func removeDownload(of option: VLMModelOption) {
+        if option == selectedModel { unload() }
+        try? LocalModelStore.removeModel(option.configuration)
+        refreshDownloadedModels()
     }
 }

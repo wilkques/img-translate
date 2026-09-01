@@ -1,5 +1,6 @@
 import Foundation
 import HuggingFace
+import MLXLMCommon
 
 /// 本機模型檔案的落地位置與 HubClient 設定。
 ///
@@ -61,5 +62,32 @@ enum LocalModelStore {
         guard let contents = try? FileManager.default.contentsOfDirectory(
             at: modelsDirectory, includingPropertiesForKeys: nil) else { return false }
         return !contents.isEmpty
+    }
+
+    /// `HubCache` 用跟 Python `huggingface_hub` 相容的快取結構:每個 repo 一個
+    /// `models--{org}--{repo}` 資料夾,底下有 `snapshots/`(下載完成才會有東西)。
+    /// 這裡直接照這個命名規則找,不透過 `HubClient` 額外發任何網路請求。
+    private static func repoDirectory(for repoId: String) -> URL {
+        modelsDirectory.appendingPathComponent(
+            "models--" + repoId.replacingOccurrences(of: "/", with: "--"), isDirectory: true)
+    }
+
+    /// 判斷某個模型的權重是否已經下載到本機快取(給「下載/移除」按鈕判斷要顯示
+    /// 哪一種)。`ModelConfiguration.id` 是 `.id(String)`(HuggingFace repo)或
+    /// `.directory(URL)`(本機路徑)兩種,只有前者需要、也才能查快取。
+    static func isModelDownloaded(_ configuration: ModelConfiguration) -> Bool {
+        guard case .id(let repoId) = configuration.id else { return false }
+        let snapshotsDir = repoDirectory(for: repoId).appendingPathComponent("snapshots")
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: snapshotsDir, includingPropertiesForKeys: nil) else { return false }
+        return !contents.isEmpty
+    }
+
+    /// 砍掉某個模型在本機快取裡的整個 repo 資料夾,釋放空間。呼叫端要自己先確認
+    /// 這顆模型目前沒有被載入使用中(`VLMTranslationEngine.removeDownload(of:)`
+    /// 會先 `unload()` 再呼叫這個)。
+    static func removeModel(_ configuration: ModelConfiguration) throws {
+        guard case .id(let repoId) = configuration.id else { return }
+        try FileManager.default.removeItem(at: repoDirectory(for: repoId))
     }
 }

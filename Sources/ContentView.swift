@@ -113,6 +113,7 @@ struct ContentView: View {
                 if let restored = VLMTranslationEngine.VLMModelOption(rawValue: vlmModelChoiceRaw) {
                     vlmEngine.selectedModel = restored
                 }
+                vlmEngine.refreshDownloadedModels()
             }
         }
     }
@@ -135,6 +136,19 @@ struct ContentView: View {
             }
 
             if engineKind != .text {
+                // 已下載就顯示「移除」釋放空間,沒下載就顯示「下載」預先抓好,
+                // 不用等真的翻譯才觸發。按鈕只作用在目前選單選到的那個選項。
+                let isDownloaded = vlmEngine.downloadedModels.contains(vlmEngine.selectedModel)
+                Button(isDownloaded ? "移除模型" : "下載模型") {
+                    if isDownloaded {
+                        vlmEngine.removeDownload(of: vlmEngine.selectedModel)
+                    } else {
+                        Task { try? await vlmEngine.ensureLoaded() }
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(isDownloaded ? .red : .accentColor)
+
                 // 選項比 3 個多、名稱較長,用 .menu 不用跟上面的引擎選單搶版面。
                 Picker("VLM 模型", selection: Binding(
                     get: { vlmEngine.selectedModel },
