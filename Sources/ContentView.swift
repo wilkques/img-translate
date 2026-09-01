@@ -229,27 +229,50 @@ struct ContentView: View {
     /// 生成失敗的區塊額外顯示「有沒有走重試、重試看到多寬的圖、兩次生成的原始輸出」
     /// ——先前好幾輪裝機測試,主要路線失敗跟重試也失敗在畫面上長得一模一樣,等於
     /// 沒有資訊可以判斷該往哪個方向修,只能瞎猜 prompt/參數。
+    /// 每列預設**收合**,只留「一眼看出這塊翻得對不對」的摘要行(Vision/VLM讀到/
+    /// 譯文/來源)。縮圖、重試標記、兩次原始輸出這些只有要深入除錯才需要的東西,
+    /// 移進展開內容——沿用 `pageDebugSection` 唯一現成的 `DisclosureGroup` 寫法,
+    /// 不引入新元件。四塊全部固定展開時畫面會塞進 2 張縮圖+6 行文字,裝機截圖
+    /// 很快就爆版,收合掉才看得清楚。
     private var debugList: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 8) {
                 ForEach(blocks) { block in
-                    HStack(alignment: .top, spacing: 8) {
-                        VStack(spacing: 2) {
-                            if let crop = cropPreviews[block.id] {
-                                Image(uiImage: crop)
-                                    .resizable()
-                                    .scaledToFit()
-                                    .frame(width: 90, height: 44)
-                                    .border(.gray)
+                    DisclosureGroup {
+                        HStack(alignment: .top, spacing: 8) {
+                            VStack(spacing: 2) {
+                                if let crop = cropPreviews[block.id] {
+                                    Image(uiImage: crop)
+                                        .resizable()
+                                        .scaledToFit()
+                                        .frame(width: 90, height: 44)
+                                        .border(.gray)
+                                }
+                                if let wider = widerCropPreviews[block.id] {
+                                    Image(uiImage: wider)
+                                        .resizable()
+                                        .scaledToFit()
+                                        .frame(width: 90, height: 60)
+                                        .border(.orange)
+                                }
                             }
-                            if let wider = widerCropPreviews[block.id] {
-                                Image(uiImage: wider)
-                                    .resizable()
-                                    .scaledToFit()
-                                    .frame(width: 90, height: 60)
-                                    .border(.orange)
+                            VStack(alignment: .leading, spacing: 2) {
+                                if block.usedWiderContextRetry {
+                                    Text("↻ 已走寬裁圖重試(橘框=重試看到的圖)")
+                                        .foregroundStyle(.orange)
+                                    if let first = block.firstAttemptRawOutput {
+                                        Text("第1次原始輸出:\(Self.debugTruncated(first))")
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                if let raw = block.rawOutput {
+                                    Text("\(block.usedWiderContextRetry ? "重試" : "")原始輸出:\(Self.debugTruncated(raw))")
+                                        .foregroundStyle(.secondary)
+                                }
                             }
                         }
+                        .padding(.top, 2)
+                    } label: {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Vision:\(block.visionText)")
                             if let recognized = block.recognizedText, !recognized.isEmpty {
@@ -258,23 +281,10 @@ struct ContentView: View {
                             Text("譯文:\(block.translatedText ?? "…")")
                             Text(Self.sourceLine(for: block))
                                 .foregroundStyle(block.source == .wholePage ? .green : .secondary)
-
-                            if block.usedWiderContextRetry {
-                                Text("↻ 已走寬裁圖重試(橘框=重試看到的圖)")
-                                    .foregroundStyle(.orange)
-                                if let first = block.firstAttemptRawOutput {
-                                    Text("第1次原始輸出:\(Self.debugTruncated(first))")
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                            if let raw = block.rawOutput {
-                                Text("\(block.usedWiderContextRetry ? "重試" : "")原始輸出:\(Self.debugTruncated(raw))")
-                                    .foregroundStyle(.secondary)
-                            }
                         }
-                        .font(.system(.caption2, design: .monospaced))
-                        .textSelection(.enabled)
                     }
+                    .font(.system(.caption2, design: .monospaced))
+                    .textSelection(.enabled)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
