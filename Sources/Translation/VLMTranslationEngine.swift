@@ -241,12 +241,24 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     /// ⚠️ 裝機實測(拿掉 BLOCK 編號後這輪):結構卡點解決了,模型真的開始讀圖,
     /// `ORIGINAL` 行也確實遵守「不准連續超過 4 次」——但同一條規則對 `TRANSLATION`
     /// 行完全沒有約束力,翻譯難字(狀聲詞)時卡進「啊啊啊啊…」的重複迴圈,燒光整頁
-    /// 512 token 額度,後面的區塊完全沒機會被列出來。原本的規則寫「in any line」,
-    /// 顯然不夠具體——模型讀原文時有「照抄圖上筆畫」這個具體錨點,翻譯時沒有等效的
-    /// 停止訊號。→ 加一條**專門針對 TRANSLATION 的規則**,明講「這條規則對翻譯行
-    /// 一樣嚴格適用」並給出具體的短範例(`啊啊啊` 而不是長串),再加一個字數上限
-    /// 當第二道防線——就算模型還是不遵守「不准連續超過 4 次」,字數上限至少能把
-    /// 單一區塊失控時吃掉的額度限制在一個小範圍,不會拖垮整頁其他區塊。
+    /// 512 token 額度,後面的區塊完全沒機會被列出來。
+    ///
+    /// ⚠️ 裝機實測(加長 TRANSLATION 規則後這輪,**可重現兩次**):結果不是翻譯卡
+    /// 重複,而是整段把 prompt 的說明文字(含 placeholder 括號內容、Rules 清單、
+    /// 結尾的 Output 那句)幾乎一字不差複誦回來,連讀圖都沒發生。比對三輪的
+    /// prompt 長度與結果——8/31 原版(最長:數量提示+BLOCK 編號+兩步驟)卡在結構
+    /// 層面;拿掉編號那版(較短)有讀圖但翻譯卡重複;這版把 Rules 拉長、
+    /// placeholder 塞進整段說明文字(又變長)反而整段照抄——長度/指令量往上,結果
+    /// 往下,三輪一致。**根因收斂到「prompt 總指令量超出這顆 4-bit 小模型的負荷」,
+    /// 不是任何單一措辭的問題**。
+    /// → 這版重新對齊已驗證穩定的逐塊 prompt(`makePrompt`)的結構:語意說明
+    /// (標點、不修正成真實單字、狀聲詞要音譯)放在 Step 1/Step 2 的敘述句裡,
+    /// 放在句子裡的說明性文字對模型來說是「要遵守的指示」;放進 `<...>` 括號的
+    /// placeholder **必須維持極短**(`<the text you read>` 這種程度),那才是模型
+    /// 真正要模仿的「輸出範例格式」,兩者不能混在一起,混在一起會讓模型分不清
+    /// 「這是指示」還是「這是我該寫的內容」。同時把三條 TRANSLATION 相關規則合併回
+    /// 一條,整體字數盡量貼近「拿掉編號那版」(目前為止長度最短、進展最多的版本),
+    /// 不要在別處把長度加回去。
     ///
     /// **刻意不做**:把 Vision 的 OCR 文字當提示塞進 prompt(那樣對位會變得很簡單)。
     /// 那會重新引入混合式架構要避開的污染——模型會錨定在 `¡LIWA! ¡¡LWAA!!` 上複製
@@ -258,26 +270,27 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         speech balloons, some of it is shouting or a sound effect drawn across the artwork.
 
         For every piece of \(source) text on the page, in reading order (top to bottom, \
-        and for text at the same height, left to right), write:
-        ORIGINAL: <the text as it is drawn — keep punctuation and inverted marks (¡ ¿), \
-        do not correct it into a real word; it may be a scream or a sound effect rather \
-        than a word>
-        TRANSLATION: <the \(target) translation, kept short; if it is a sound effect or a \
-        scream, transliterate the sound into \(target) as a short burst instead of \
-        translating its literal meaning>
+        and for text at the same height, left to right):
+        Step 1. Read the text as it is drawn. Keep punctuation and inverted marks (¡ ¿). \
+        Do not correct it into a real word — it may be a scream or a sound effect rather \
+        than a word.
+        Step 2. Translate it into \(target). If it is a sound effect or a scream, \
+        transliterate the sound into \(target) instead of translating its literal meaning.
 
         Rules:
-        - Never write the same letter or character more than 4 times in a row, in ANY line.
-        - This applies just as strictly to TRANSLATION as to ORIGINAL: a scream or sound \
-        effect must be translated as a short burst (2-4 repeats is enough, for example \
-        "啊啊啊"), never a long string of the same character.
-        - Keep every TRANSLATION under about 15 characters.
+        - Never write the same letter or character more than 4 times in a row, in ANY \
+        line, including TRANSLATION — a scream must be a short burst like "啊啊啊", not a \
+        long string, and kept under about 15 characters.
         - If a text area is too hard to read, write "ORIGINAL: ?" and still give your best \
         TRANSLATION, then move on to the next one. Never stop on a hard one.
         - Do not describe the artwork, the characters or the panels. Text only.
 
-        Output ORIGINAL/TRANSLATION pairs one after another, nothing else — no numbering, \
-        no explanation, no quotes. Stop once every text area on the page is listed.
+        For each text area write exactly:
+        ORIGINAL: <the text you read>
+        TRANSLATION: <the \(target) text>
+
+        Output these pairs one after another, nothing else — no numbering, no explanation, \
+        no quotes. Stop once every text area on the page is listed.
         """
     }
 
