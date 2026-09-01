@@ -158,8 +158,7 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         let targetName = try LanguageNames.name(for: target)
         let container = try await ensureLoaded()
 
-        let prompt = Self.makePagePrompt(
-            source: sourceName, target: targetName, approximateBlockCount: expectedBlockCount)
+        let prompt = Self.makePagePrompt(source: sourceName, target: targetName)
 
         var processing = UserInput.Processing()
         processing.resize = Self.pageResizeTarget(
@@ -222,52 +221,63 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     /// 沿用模型已經證明會正確輸出的 `ORIGINAL:`/`TRANSLATION:` 兩行,並保留已驗證的
     /// ORIGINAL→TRANSLATION 順序(第六輪實測證明對調是負分,連原本翻對的句子都會壞)。
     ///
-    /// 三個針對實測失敗模式的設計:
+    /// ⚠️ 裝機實測(第九輪,展開「整頁原始輸出」才看到):舊版 prompt 要求模型自己
+    /// 估計「大約幾塊文字」、再輸出自己遞增生成的 `BLOCK n` 編號,結果整頁輸出從頭到
+    /// 尾就是 `BLOCK 0 0 0 0 0 0...`——連第一塊的 `ORIGINAL:` 都沒寫到,卡在「要不要
+    /// 寫編號」這個結構層面,根本還沒開始讀圖。這代表舊版 prompt 的複合式指令(估算
+    /// 數量 + 排序 + 每塊兩步驟 + 三條規則 + 自己生成編號)本身就超出這顆 4-bit 小
+    /// 模型的指令遵循能力,是比「難字卡迴圈」更早發生的卡點,跟這個功能真正要驗證的
+    /// 假設(模型看到多大範圍的圖能不能讀懂難字)完全是不同的變因。
+    /// → 這版拿掉「roughly N text areas」的數量提示與 `BLOCK n` 自生成編號,只留下
+    /// 純粹重複的 `ORIGINAL:`/`TRANSLATION:` 兩行——`PageOutputParser` 本來就設計成
+    /// 沒有 `BLOCK` 行也解析得出來(遇到第二個 `ORIGINAL:` 就隱含換下一項),不用動
+    /// 解析邏輯。目的是把「prompt 結構複雜度」這個新變因跟「上下文範圍」主假設分開,
+    /// 只留下兩條已經證實對防卡迴圈有效的硬規則:
     /// 1. 「同一個字母不准連續超過 4 次」放在獨立的 Rules 區塊當**硬規則**,不是埋在
     ///    步驟裡的軟要求——第五輪證明軟措辭沒有用。
     /// 2. 「太難讀就寫 `ORIGINAL: ?`,不要停在難的那個」給一個明確的逃生口:卡迴圈的
     ///    根源就是重複字母沒有自然的停止點。
-    /// 3. `BLOCK n` 分隔給模型「後面還有別塊要列」的前進壓力(單獨面對一塊
-    ///    `UWAAAAA…` 時完全沒有前進壓力),同時給解析器明確的項目邊界。
+    ///
+    /// ⚠️ 裝機實測(拿掉 BLOCK 編號後這輪):結構卡點解決了,模型真的開始讀圖,
+    /// `ORIGINAL` 行也確實遵守「不准連續超過 4 次」——但同一條規則對 `TRANSLATION`
+    /// 行完全沒有約束力,翻譯難字(狀聲詞)時卡進「啊啊啊啊…」的重複迴圈,燒光整頁
+    /// 512 token 額度,後面的區塊完全沒機會被列出來。原本的規則寫「in any line」,
+    /// 顯然不夠具體——模型讀原文時有「照抄圖上筆畫」這個具體錨點,翻譯時沒有等效的
+    /// 停止訊號。→ 加一條**專門針對 TRANSLATION 的規則**,明講「這條規則對翻譯行
+    /// 一樣嚴格適用」並給出具體的短範例(`啊啊啊` 而不是長串),再加一個字數上限
+    /// 當第二道防線——就算模型還是不遵守「不准連續超過 4 次」,字數上限至少能把
+    /// 單一區塊失控時吃掉的額度限制在一個小範圍,不會拖垮整頁其他區塊。
     ///
     /// **刻意不做**:把 Vision 的 OCR 文字當提示塞進 prompt(那樣對位會變得很簡單)。
     /// 那會重新引入混合式架構要避開的污染——模型會錨定在 `¡LIWA! ¡¡LWAA!!` 上複製
     /// Vision 的錯誤,正是先前翻出「離哇」的成因。Vision 文字只在事後當對位訊號。
-    private nonisolated static func makePagePrompt(
-        source: String, target: String, approximateBlockCount: Int
-    ) -> String {
+    private nonisolated static func makePagePrompt(source: String, target: String) -> String {
         """
         This is a full page from a comic book. All the text on it is written in \
         \(source), in a stylised hand-lettered bold font. Some of it is dialogue in \
         speech balloons, some of it is shouting or a sound effect drawn across the artwork.
 
-        List every piece of \(source) text on the page, in reading order: top to bottom, \
-        and for text at the same height, left to right. There are roughly \
-        \(approximateBlockCount) separate text areas; if you see more or fewer, list what \
-        you actually see.
-
-        For each text area:
-        Step 1. Read the text as it is drawn. Keep punctuation and inverted marks (¡ ¿). \
-        Do not correct it into a real word — it may be a scream or a sound effect rather \
-        than a word.
-        Step 2. Translate it into \(target). If it is a sound effect or a scream, \
-        transliterate the sound into \(target) instead of translating its literal meaning.
+        For every piece of \(source) text on the page, in reading order (top to bottom, \
+        and for text at the same height, left to right), write:
+        ORIGINAL: <the text as it is drawn — keep punctuation and inverted marks (¡ ¿), \
+        do not correct it into a real word; it may be a scream or a sound effect rather \
+        than a word>
+        TRANSLATION: <the \(target) translation, kept short; if it is a sound effect or a \
+        scream, transliterate the sound into \(target) as a short burst instead of \
+        translating its literal meaning>
 
         Rules:
-        - Never write the same letter more than 4 times in a row, in any line, for any reason.
+        - Never write the same letter or character more than 4 times in a row, in ANY line.
+        - This applies just as strictly to TRANSLATION as to ORIGINAL: a scream or sound \
+        effect must be translated as a short burst (2-4 repeats is enough, for example \
+        "啊啊啊"), never a long string of the same character.
+        - Keep every TRANSLATION under about 15 characters.
         - If a text area is too hard to read, write "ORIGINAL: ?" and still give your best \
         TRANSLATION, then move on to the next one. Never stop on a hard one.
         - Do not describe the artwork, the characters or the panels. Text only.
 
-        Output exactly this and nothing else, no explanation, no quotes:
-        BLOCK 1
-        ORIGINAL: <the text you read>
-        TRANSLATION: <the \(target) text>
-        BLOCK 2
-        ORIGINAL: ...
-        TRANSLATION: ...
-
-        Continue until every text area on the page is listed, then stop.
+        Output ORIGINAL/TRANSLATION pairs one after another, nothing else — no numbering, \
+        no explanation, no quotes. Stop once every text area on the page is listed.
         """
     }
 
