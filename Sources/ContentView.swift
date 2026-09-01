@@ -319,7 +319,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("整頁輸出 \(pageItemCount) 項 / Vision 定位 \(blocks.count) 塊")
                 if pageItemCount != blocks.count {
-                    Text("⚠️ 數量不符,整批退回逐塊(不做猜測性對位)")
+                    Text("⚠️ 數量不符,逐項比對相似度,過門檻才採用(見下方各區塊來源)")
                         .foregroundStyle(.orange)
                 }
                 DisclosureGroup("整頁原始輸出(\(pageRawOutput.count) 字)") {
@@ -475,25 +475,38 @@ struct ContentView: View {
             pageRawOutput = pageResult.rawOutput
             pageItemCount = pageResult.items.count
 
-            // 數量必須完全相符才做順序對位。數量不符就整批退回逐塊,不做任何
-            // 猜測性對位——Vision 的 bbox 是回填唯一依據,把譯文綁到錯的框會變成
-            // 「看起來成功、其實是錯的」沉默失敗,比明確失敗更難發現、更貴。
-            if pageResult.items.count == blocks.count {
-                for i in blocks.indices {
-                    let item = pageResult.items[i]
-                    guard !item.isDegenerate, !item.translated.isEmpty else { continue }
-                    let score = PageOutputParser.similarity(
-                        PageOutputParser.fold(item.original),
-                        PageOutputParser.fold(blocks[i].visionText))
-                    guard score >= Self.pageMatchThreshold else { continue }
+            // ⚠️ 2026-09-01 改動:原本要求數量完全相符才做「按位置」對位,數量不符
+            // 就整批放棄退回逐塊——但裝機實測發現這樣會連同「其實內容是對的」項目
+            // 一起丟掉(整頁只解析出 1 項、但那 1 項對應到的區塊相似度算下來遠高於
+            // 門檻)。真正的安全網從來不是「數量」,是下面這行 `similarity >=
+            // pageMatchThreshold` 的相似度檢查——位置只是原本用來配對的線索,現在
+            // 不管解析出幾項,一律逐項找「還沒配到的區塊裡相似度最高的那個」,分數
+            // 沒過門檻一樣不會採用,沒被任何項目配到的區塊照舊退回逐塊。這不是新的
+            // 猜測性邏輯,只是把原本就存在的相似度把關套用到數量不符的部分結果上。
+            var usedBlockIndices = Set<Int>()
+            for item in pageResult.items {
+                guard !item.isDegenerate, !item.translated.isEmpty else { continue }
+                let foldedOriginal = PageOutputParser.fold(item.original)
 
-                    blocks[i].recognizedText = item.original
-                    blocks[i].translatedText = item.translated
-                    blocks[i].rawOutput = item.rawSlice
-                    blocks[i].source = .wholePage
-                    blocks[i].matchedItemIndex = item.index
-                    blocks[i].matchScore = score
+                var bestIndex: Int?
+                var bestScore = 0.0
+                for i in blocks.indices where !usedBlockIndices.contains(i) {
+                    let score = PageOutputParser.similarity(
+                        foldedOriginal, PageOutputParser.fold(blocks[i].visionText))
+                    if score > bestScore {
+                        bestScore = score
+                        bestIndex = i
+                    }
                 }
+                guard let i = bestIndex, bestScore >= Self.pageMatchThreshold else { continue }
+                usedBlockIndices.insert(i)
+
+                blocks[i].recognizedText = item.original
+                blocks[i].translatedText = item.translated
+                blocks[i].rawOutput = item.rawSlice
+                blocks[i].source = .wholePage
+                blocks[i].matchedItemIndex = item.index
+                blocks[i].matchScore = bestScore
             }
         }
 
