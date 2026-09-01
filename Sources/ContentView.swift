@@ -417,9 +417,16 @@ struct ContentView: View {
             // (整個對話框/分鏡),讓模型有機會靠上下文正確讀出孤立小裁圖讀不出來的字
             // (裝機實測發現同一顆模型透過 Locally AI 看整張圖讀得出來,見
             // `VLMTranslationEngine.translateRegion` 的說明)。
+            // ⚠️ 裝機實測(修 parse() bug 後這輪,retry 第一次真的跑到):範圍
+            // 1.5/4.0 擴邊後 retry 還是整段卡進純 `¡` 迴圈,完全沒讀到內容,而整頁
+            // 路線(給模型看整張頁面)同一塊文字至少讀到了實質內容——代表這個範圍
+            // 對這塊還是不夠寬。拉大到 2.5/6.0。`padded()` 最後會夾回頁面邊界,
+            // 貼近頁緣的區塊(例如頁面最上方的區塊)擴邊往外的部分可能提早被夾掉,
+            // 實際擴大的效果不保證跟倍數成正比——裝機後看橘框縮圖的實際範圍才知道
+            // 這次有沒有真的擴大,不能只看這行參數。
             let widerRect = RegionCropper.padded(
                 blocks[i].pixelRect, pixelWidth: pixelWidth, pixelHeight: pixelHeight,
-                padFractionX: 1.5, padFractionY: 4.0, minPadPixels: 60)
+                padFractionX: 2.5, padFractionY: 6.0, minPadPixels: 80)
             let widerCrop = RegionCropper.crop(page, toPixelRect: widerRect)
 
             let result = try await vlmEngine.translateRegion(
@@ -494,9 +501,16 @@ struct ContentView: View {
         for i in blocks.indices where blocks[i].translatedText == nil {
             guard let crop = crops[i] else { continue }
             status = "整頁沒對到的區塊改用逐塊翻譯…"
+            // ⚠️ 裝機實測(修 parse() bug 後這輪,retry 第一次真的跑到):範圍
+            // 1.5/4.0 擴邊後 retry 還是整段卡進純 `¡` 迴圈,完全沒讀到內容,而整頁
+            // 路線(給模型看整張頁面)同一塊文字至少讀到了實質內容——代表這個範圍
+            // 對這塊還是不夠寬。拉大到 2.5/6.0。`padded()` 最後會夾回頁面邊界,
+            // 貼近頁緣的區塊(例如頁面最上方的區塊)擴邊往外的部分可能提早被夾掉,
+            // 實際擴大的效果不保證跟倍數成正比——裝機後看橘框縮圖的實際範圍才知道
+            // 這次有沒有真的擴大,不能只看這行參數。
             let widerRect = RegionCropper.padded(
                 blocks[i].pixelRect, pixelWidth: pixelWidth, pixelHeight: pixelHeight,
-                padFractionX: 1.5, padFractionY: 4.0, minPadPixels: 60)
+                padFractionX: 2.5, padFractionY: 6.0, minPadPixels: 80)
             let widerCrop = RegionCropper.crop(page, toPixelRect: widerRect)
 
             let result = try await vlmEngine.translateRegion(
