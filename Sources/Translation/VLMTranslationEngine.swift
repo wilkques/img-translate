@@ -75,15 +75,16 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     ///
     /// ⚠️ 裝機實測(2026-09-01,retry 改餵整頁圖之後):把 `widerContext` 直接換成
     /// 整頁原圖後,retry 對頂部難字還是整段空轉純 `¡` 符號,跟裁圖範圍大小無關
-    /// (範圍已經跟整頁路線完全一樣)。但整頁路線(`pageGenerateParameters`,
-    /// `maxTokens: 512`)用同一張圖至少讀到了實質內容,retry 這裡的 `maxTokens`
-    /// 只有 150——如果模型一開始生成就卡進重複,150 token 的額度可能撐不到它脫離
-    /// 卡頓、走回正常吐字,512 的整頁路線才有機會撐過去。retry prompt
-    /// (`makeRetryPrompt`)其實比整頁 prompt 簡單(只要求一行 TRANSLATION),照理
-    /// 該更容易成功,結果卻更差,額度不夠很可能就是原因。拉到跟整頁路線一樣的
-    /// 512,測試「額度」這一個變因,不動 prompt 或圖片範圍。
+    /// (範圍已經跟整頁路線完全一樣)。一度懷疑是 `maxTokens` 額度不夠(整頁路線
+    /// 512、這裡只有 150),試著拉到 512——**假設被推翻,而且拉高還有副作用**:
+    /// 重試原始輸出精準卡在新上限「共512字」,證實模型根本沒有要脫離迴圈的跡象,
+    /// 不是「差一點撐過去」,額度大小不是這塊的瓶頸。更糟的是,同一輪跑起來的
+    /// `YA BASTA...`(十幾輪來唯一一次)、`GRRRAAAGH` 譯文都跟著失常/跑掉——裝機
+    /// 重跑「maxTokens 還是 150」的舊版本確認這兩塊立刻恢復穩定,坐實是拉高
+    /// maxTokens 的副作用(推測是單一區塊生成時間拉長,拖累同一輪後續區塊的生成
+    /// 穩定性)。改回 150,不留這個沒有好處、還有代價的改動。
     private let retryParameters = GenerateParameters(
-        maxTokens: 512,
+        maxTokens: 150,
         temperature: 0.2
     )
 
