@@ -143,7 +143,17 @@ struct ContentView: View {
                     if isDownloaded {
                         vlmEngine.removeDownload(of: vlmEngine.selectedModel)
                     } else {
-                        Task { try? await vlmEngine.ensureLoaded() }
+                        Task {
+                            do {
+                                try await vlmEngine.ensureLoaded()
+                            } catch {
+                                // 載入失敗時清掉舊翻譯結果,避免畫面留著「上一顆
+                                // 模型」跑出來的殘留結果,誤判成這次也成功了
+                                // (裝機實測踩過這個:Gemma 4 載入失敗,畫面卻還
+                                // 顯示 Qwen3-VL 上一輪的翻譯,看起來像成功了)。
+                                for i in blocks.indices { blocks[i].resetTranslation() }
+                            }
+                        }
                     }
                 }
                 .font(.caption)
@@ -155,6 +165,8 @@ struct ContentView: View {
                     set: { newValue in
                         vlmEngine.changeModel(to: newValue)
                         vlmModelChoiceRaw = newValue.rawValue
+                        // 換模型代表舊結果是別顆模型跑出來的,不能再算數。
+                        for i in blocks.indices { blocks[i].resetTranslation() }
                     }
                 )) {
                     ForEach(VLMTranslationEngine.VLMModelOption.allCases) { option in

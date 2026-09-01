@@ -27,6 +27,25 @@ struct TextBlock: Identifiable {
     /// 對位的字串相似度分數。印在除錯清單上,讓接受門檻可以用實測數字校準,
     /// 而不是繼續用猜的。
     var matchScore: Double?
+
+    /// 清掉這塊所有翻譯相關欄位,只留 Vision 定位資訊。
+    ///
+    /// 為什麼需要:VLM 模型選單新增後發現,切換/重新下載模型如果失敗,畫面上
+    /// 還是會留著「上一顆模型」跑出來的舊翻譯結果——因為換模型不會觸發
+    /// `runPipeline()` 重跑(`.task(id:)` 的 key 不含模型選擇),`blocks` 沒被
+    /// 重置。裝機實測就踩到這個:Gemma 4 載入失敗,但畫面誤導成「翻譯成功」,
+    /// 其實是 Qwen3-VL 上一輪的殘留結果。換模型、或載入失敗時都要呼叫這個,
+    /// 不要讓不同模型的結果混在一起。
+    mutating func resetTranslation() {
+        recognizedText = nil
+        translatedText = nil
+        rawOutput = nil
+        usedWiderContextRetry = false
+        firstAttemptRawOutput = nil
+        source = .none
+        matchedItemIndex = nil
+        matchScore = nil
+    }
 }
 
 /// 譯文的來源路線,除錯清單顯示用。
