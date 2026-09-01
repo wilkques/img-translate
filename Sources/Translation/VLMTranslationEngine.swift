@@ -11,10 +11,10 @@ import MLXVLM
 /// `¡UWA! ¡¡UWAA!!` 被認成 `¡LIWA! ¡¡LWAA!!`),但 Vision 的 boundingBox 是可靠的、
 /// 也是「原地回填」唯一的座標來源。所以:位置 = Vision,文字內容 = VLM。
 ///
-/// 模型:lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit(3.09GB / 4-bit)。
-/// 這個 id 在 `VLMRegistry` 有內建 preset,直接用 preset 才會帶到
-/// `extraEOSTokens: ["<|im_end|>"]`——漏掉的話生成不會停,每塊都跑滿 maxTokens,
-/// 速度直接爛掉。
+/// 模型可以在 app 裡切換(見 `VLMModelOption`),預設 lmstudio-community/
+/// Qwen3-VL-4B-Instruct-MLX-4bit(3.09GB / 4-bit)。每個選項都要用 `VLMRegistry`
+/// 內建 preset 或明講 `extraEOSTokens: ["<|im_end|>"]`——漏掉的話生成不會停,
+/// 每塊都跑滿 maxTokens,速度直接爛掉。
 @MainActor
 final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
 
@@ -28,18 +28,53 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         case failed(String)
     }
 
+    /// 2026-09-01:原本寫死 Qwen3-VL-4B 一顆,排查 UWA 這塊難字時發現 8/31 筆記裡
+    /// 「模型/訓練資料差異」這個假設從頭到尾沒真正測過(Cyril 用 Locally AI 的
+    /// Gemma 4/Qwen3.5 讀得出來,我們用的模型完全不同顆)。改成可選,不用每次
+    /// 猜哪顆模型就要改程式碼重新編譯裝機。
+    enum VLMModelOption: String, CaseIterable, Identifiable {
+        case qwen3VL4B = "Qwen3-VL-4B"
+        case qwen2_5VL3B = "Qwen2.5-VL-3B"
+        case qwen3VL2B = "Qwen3-VL-2B"
+        case gemma4E2B = "Gemma 4 E2B"
+        case gemma4E4B = "Gemma 4 E4B"
+
+        var id: String { rawValue }
+
+        /// ⚠️ `gemma4_E2B_it_4bit`/`gemma4_E4B_it_4bit` 是透過網路搜尋找到的
+        /// `VLMRegistry` preset 名稱,沒有管道直接讀到專案釘住版本
+        /// (`mlx-swift-lm` 3.31.4)的原始碼逐字確認拼字——如果編譯錯誤說找不到
+        /// 這個屬性,去對照該 tag 的 `VLMModelFactory.swift` 修正,不是程式邏輯
+        /// 的問題。
+        var configuration: ModelConfiguration {
+            switch self {
+            case .qwen3VL4B: return VLMRegistry.qwen3VL4BInstruct4Bit
+            case .qwen2_5VL3B: return VLMRegistry.qwen2_5VL3BInstruct4Bit
+            case .qwen3VL2B:
+                return ModelConfiguration(
+                    id: "mlx-community/Qwen3-VL-2B-Instruct-4bit",
+                    extraEOSTokens: ["<|im_end|>"])
+            case .gemma4E2B: return VLMRegistry.gemma4_E2B_it_4bit
+            case .gemma4E4B: return VLMRegistry.gemma4_E4B_it_4bit
+            }
+        }
+
+        /// 顯示用的下載大小估計,只影響進度條準不準,不影響功能。Gemma 4 兩顆是
+        /// 用有效參數量推算的粗估值(MatFormer 架構打包方式可能跟 dense 4-bit
+        /// 不同),第一次真的下載完後應該回來對實際大小校正。
+        var approximateDownloadBytes: Int64 {
+            switch self {
+            case .qwen3VL4B: return 3_200_000_000    // safetensors 3.09GB + tokenizer/config
+            case .qwen2_5VL3B: return 2_000_000_000  // 待確認
+            case .qwen3VL2B: return 1_780_000_000
+            case .gemma4E2B: return 2_000_000_000    // 待確認,≈2B 有效參數
+            case .gemma4E4B: return 3_500_000_000    // 待確認,≈4B 有效參數
+            }
+        }
+    }
+
     @Published private(set) var phase: Phase = .idle
-
-    /// 顯示用的下載大小估計:safetensors 3.09GB + tokenizer/config 約 0.1GB
-    static let approximateDownloadBytes: Int64 = 3_200_000_000
-
-    private static let configuration = VLMRegistry.qwen3VL4BInstruct4Bit
-
-    // 記憶體/速度不夠時,只換這行就能降級,其他程式碼不用動
-    // (三個候選都走 Qwen*VLProcessor / VLMModelFactory):
-    //   VLMRegistry.qwen2_5VL3BInstruct4Bit   // mlx-community/Qwen2.5-VL-3B-Instruct-4bit
-    //   ModelConfiguration(id: "mlx-community/Qwen3-VL-2B-Instruct-4bit",
-    //                      extraEOSTokens: ["<|im_end|>"])   // 記憶體逃生梯,1.78GB
+    @Published var selectedModel: VLMModelOption = .qwen3VL4B
 
     private var container: ModelContainer?
     private var loadTask: Task<ModelContainer, Error>?
@@ -476,14 +511,24 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         // VLM 權重 3.1GB(比 TranslateGemma 的 2.2GB 大),cache 上限相對壓小一點。
         MLX.Memory.cacheLimit = 128 * 1024 * 1024
 
-        let configuration = Self.configuration
+        // 在進入 detached task 前先讀一次(MainActor 隔離的 @Published 屬性),
+        // 避免 task 內部跨 actor 存取 self.selectedModel。
+        let modelOption = selectedModel
+        let configuration = modelOption.configuration
+        let approximateDownloadBytes = modelOption.approximateDownloadBytes
 
         let task = Task.detached(priority: .userInitiated) { [weak self] () throws -> ModelContainer in
+            // ⚠️ `isModelPresent()` 只檢查「models 目錄有沒有任何東西」,不分是
+            // 哪一顆模型——多模型可選之後,切到目前還沒下載過的新模型時,如果
+            // 目錄裡已經有另一顆模型,這個提前檢查會被跳過,空間不夠時會晚一點
+            // 在 `VLMModelFactory.loadContainer` 內部才失敗(錯誤訊息比較不友善,
+            // 但不會靜默損毀資料)。之前只有一顆模型時這不是問題,現在是已知的
+            // 小缺口,還沒修。
             if !LocalModelStore.isModelPresent(),
                let available = LocalModelStore.availableBytesForImportantUsage(),
-               available < Self.approximateDownloadBytes + 500_000_000 {
+               available < approximateDownloadBytes + 500_000_000 {
                 throw LocalLLMError.insufficientDiskSpace(
-                    needed: Self.approximateDownloadBytes, available: available)
+                    needed: approximateDownloadBytes, available: available)
             }
 
             let downloader = HubSnapshotDownloader(try LocalModelStore.makeHubClient())
@@ -549,5 +594,14 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         loadTask = nil
         MLX.Memory.clearCache()
         phase = .idle
+    }
+
+    /// 切換要用的 VLM 模型。一定要先卸載目前的模型才能換 `selectedModel`——
+    /// `ensureLoaded()` 一開始就會回傳已快取的 `container`,不先卸載的話換了
+    /// 選項也不會真的載入新模型,呼叫端不用自己記得順序。
+    func changeModel(to option: VLMModelOption) {
+        guard option != selectedModel else { return }
+        unload()
+        selectedModel = option
     }
 }

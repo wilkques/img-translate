@@ -31,6 +31,11 @@ struct ContentView: View {
     private static let pageMatchThreshold = 0.3
     @StateObject private var localEngine = LocalLLMTranslationEngine()
     @StateObject private var vlmEngine = VLMTranslationEngine()
+    /// 專案第一個 `@AppStorage` 用法——存 `VLMModelOption` 的 rawValue,跨 app
+    /// 啟動記住上次選的模型。實際生效的來源永遠是 `vlmEngine.selectedModel`,
+    /// 這個只負責持久化,見下面 `.onAppear` 同步邏輯。
+    @AppStorage("vlmModelChoice") private var vlmModelChoiceRaw =
+        VLMTranslationEngine.VLMModelOption.qwen3VL4B.rawValue
 
     private let image: UIImage? = {
         guard let path = Bundle.main.path(forResource: "sample-es", ofType: "jpg"),
@@ -100,6 +105,15 @@ struct ContentView: View {
             .task(id: "\(sourceLanguage)|\(targetLanguage)|\(engineKind.rawValue)") {
                 await runPipeline()
             }
+            .onAppear {
+                // @AppStorage 跟 @StateObject 的初始值沒辦法在 init 階段互相
+                // 參照,所以用 onAppear 同步一次——這時 vlmEngine 一定還沒真的
+                // 載入任何模型,直接設定 selectedModel 就好,不用走 changeModel(to:)
+                // 那個「先卸載」的保護(沒有東西可以卸載)。
+                if let restored = VLMTranslationEngine.VLMModelOption(rawValue: vlmModelChoiceRaw) {
+                    vlmEngine.selectedModel = restored
+                }
+            }
         }
     }
 
@@ -118,6 +132,23 @@ struct ContentView: View {
                 case .visionPage, .visionRegion: localEngine.unload()
                 case .text: vlmEngine.unload()
                 }
+            }
+
+            if engineKind != .text {
+                // 選項比 3 個多、名稱較長,用 .menu 不用跟上面的引擎選單搶版面。
+                Picker("VLM 模型", selection: Binding(
+                    get: { vlmEngine.selectedModel },
+                    set: { newValue in
+                        vlmEngine.changeModel(to: newValue)
+                        vlmModelChoiceRaw = newValue.rawValue
+                    }
+                )) {
+                    ForEach(VLMTranslationEngine.VLMModelOption.allCases) { option in
+                        Text(option.rawValue).tag(option)
+                    }
+                }
+                .pickerStyle(.menu)
+                .font(.caption)
             }
 
             switch engineKind {
@@ -156,8 +187,9 @@ struct ContentView: View {
         case .idle:
             EmptyView()
         case .downloading(let fraction):
+            let gb = Double(vlmEngine.selectedModel.approximateDownloadBytes) / 1_000_000_000
             ProgressView(value: fraction) {
-                Text("下載視覺模型中 \(Int(fraction * 100))%(約 3.1GB,首次執行請連 WiFi)")
+                Text("下載視覺模型中 \(Int(fraction * 100))%(約 \(String(format: "%.1f", gb))GB,首次執行請連 WiFi)")
                     .font(.caption2)
             }
         case .loadingWeights:
