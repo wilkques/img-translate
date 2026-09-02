@@ -625,6 +625,32 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
 
             await MainActor.run { self?.phase = .downloading(0) }
 
+            // ⚠️ 2026-09-02:上游 `HubClient` 的 `progressHandler` 裝機實測
+            // **百分比從頭到尾不會動**(下載本身有在跑,只是沒回報進度)。改成
+            // 自己起一個輪詢,定期掃硬碟看模型檔案長多大、除以預估總大小算進度
+            // ——不依賴上游行為,不管它回不回報都會動。
+            //
+            // 幾個刻意的設計:
+            // - 上限夾在 0.99:`approximateDownloadBytes` 只是估計值,實際檔案
+            //   可能比估的小,不夾住的話會提早顯示 100% 然後卡住,比不動更糟。
+            // - 只在 `phase` 還是 `.downloading` 時才寫入:下載完成後主流程會
+            //   換成 `.loadingWeights`/`.warmingUp`,輪詢不能把它蓋回去。
+            // - `defer` 取消:不管 `loadContainer` 成功、丟錯還是被取消,輪詢
+            //   都要停,不能留一個永遠在跑的背景迴圈。
+            let progressPoller = Task { @MainActor [weak self] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    guard !Task.isCancelled, let self else { break }
+                    guard case .downloading = self.phase else { continue }
+                    let bytes = LocalModelStore.downloadedBytes(configuration)
+                    guard bytes > 0, approximateDownloadBytes > 0 else { continue }
+                    let fraction = min(
+                        Double(bytes) / Double(approximateDownloadBytes), 0.99)
+                    self.phase = .downloading(fraction)
+                }
+            }
+            defer { progressPoller.cancel() }
+
             // 跟 LLMModelFactory.loadContainer 完全同簽名——HuggingFaceBridge.swift/
             // LocalModelStore.swift 一行都不用改,只是換一個 factory。
             let container = try await VLMModelFactory.shared.loadContainer(
@@ -632,10 +658,11 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
                 using: tokenizerLoader,
                 configuration: configuration
             ) { progress in
-                let fraction = progress.fractionCompleted
-                Task { @MainActor in
-                    self?.phase = fraction >= 1.0 ? .loadingWeights : .downloading(fraction)
-                }
+                // 百分比交給上面的輪詢算,這裡只留「下載完成 → 換成載入權重
+                // 階段」這個轉換。兩邊都寫百分比會互相蓋來蓋去,而且上游這個
+                // 值實測本來就不可靠。
+                guard progress.fractionCompleted >= 1.0 else { return }
+                Task { @MainActor in self?.phase = .loadingWeights }
             }
 
             // 第一次推理會編譯 Metal pipeline/配置圖像 tower 的緩衝區,可能多花十幾秒。

@@ -102,6 +102,37 @@ enum LocalModelStore {
         return !contents.isEmpty
     }
 
+    /// 某顆模型目前在本機快取目錄裡實際佔用的位元組數。
+    ///
+    /// ⚠️ 2026-09-02 新增:下載進度百分比原本完全依賴上游 `HubClient` 的
+    /// `progressHandler`,裝機實測**百分比從頭到尾不會動**(下載本身有在跑,
+    /// 只是進度沒回報)。沒辦法讀 `swift-huggingface` 的原始碼確認它為什麼不
+    /// 回報、也沒有本機編譯器可以實驗,與其瞎猜,不如換一個不依賴上游行為的
+    /// 做法:直接掃硬碟看檔案長多大,自己除以預估總大小算進度。
+    ///
+    /// 掃整個 repo 目錄(含 `blobs/` 底下下載中的暫存檔),只計 regular file
+    /// ——`snapshots/` 裡是指向 `blobs/` 的 symlink,不算 regular file,所以
+    /// 不會重複計算同一份資料。
+    static func downloadedBytes(_ configuration: ModelConfiguration) -> Int64 {
+        guard case .id(let repoId, revision: _) = configuration.id else { return 0 }
+        let root = repoDirectory(for: repoId)
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return 0 }
+
+        var total: Int64 = 0
+        for case let fileURL as URL in enumerator {
+            guard let values = try? fileURL.resourceValues(
+                forKeys: [.fileSizeKey, .isRegularFileKey]),
+                values.isRegularFile == true,
+                let size = values.fileSize else { continue }
+            total += Int64(size)
+        }
+        return total
+    }
+
     /// 砍掉某個模型在本機快取裡的整個 repo 資料夾,釋放空間。呼叫端要自己先確認
     /// 這顆模型目前沒有被載入使用中(`VLMTranslationEngine.removeDownload(of:)`
     /// 會先 `unload()` 再呼叫這個)。
