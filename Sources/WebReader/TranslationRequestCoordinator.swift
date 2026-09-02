@@ -232,26 +232,10 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
 
         guard !fractionalBlocks.isEmpty else {
             updateStatus(for: url) { $0 = .failed("OCR 找到文字但翻譯全部失敗") }
-            unloadEngineForNextImage()
             return
         }
         updateStatus(for: url) { $0 = .translated(blockCount: fractionalBlocks.count) }
         await applyOverlay(elementId: elementId, blocks: fractionalBlocks)
-        unloadEngineForNextImage()
-    }
-
-    /// ⚠️ 2026-09-02:逐塊清 Metal 快取(`finishPage()`)只清得動可回收的快取,
-    /// 清不動模型容器本身常駐的記憶體——實測換小模型才真的解決 OOM,但小模型
-    /// 翻譯品質明顯打折。改成**每張圖處理完就整個卸載模型**,下一張圖開始
-    /// 翻譯時 `ensureLoaded()` 會偵測到 `container` 是 nil 重新載入,強制把
-    /// 記憶體歸零到跟剛啟動時一樣的基準,換回用 `Qwen3-VL-4B` 的品質。代價是
-    /// 每張圖之間多了重新載入權重+暖機的延遲(權重已經在本機,不用重新下載,
-    /// 但讀檔+編譯 Metal pipeline 還是要花時間)——用速度換品質+穩定性,跟
-    /// 之前「逐塊清快取」用速度換穩定性是同一個方向,只是這次動的是更重的
-    /// 那一層。這是實驗性做法,如果重新載入的延遲拖到不能接受,再考慮拉長
-    /// 卸載週期(例如每 2-3 張圖才卸載一次)。
-    private func unloadEngineForNextImage() {
-        vlmEngine.unload()
     }
 
     private static func fractionalPayload(

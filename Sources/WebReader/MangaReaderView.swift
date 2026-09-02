@@ -15,9 +15,12 @@ import SwiftUI
 ///
 /// ⚠️ 2026-09-02:裝機實測 Jetsam 記錄證實連續處理多張網頁圖會把 App 記憶體
 /// 推到 LiveContainer 側載環境約 6GB 的上限(`reason: per-process-limit`)。
-/// 預設模型從 `Qwen3-VL-4B`(約 3.2GB)換成最小的 `Qwen3-VL-2B`(約 1.78GB),
-/// 多留將近 1.5GB 空間給 OCR/圖片解碼/推理暫存張量,並且把模型選單加到這個
-/// 畫面,方便直接裝機比較不同模型在「連續處理多張圖」這個情境下撐不撐得住。
+/// 試過換小模型(`Qwen3-VL-2B`/`Qwen2.5-VL-3B`)解決 OOM,也試過保留 `4B`
+/// 但每張圖處理完整個卸載模型——後者裝機直接 SIGABRT(卸載動作跟 Metal
+/// 非同步完成回呼搶時序,是比 OOM 更難排查的當機),已收回。最終定案:
+/// 固定用 `Qwen2.5-VL-3B`,搭配放寬過的 retry prompt(見
+/// `VLMTranslationEngine.makeRetryPrompt`),翻譯品質堪用且沒有額外當機
+/// 風險。模型選單保留,想手動試別的模型可以自己切,但預設不追求 `4B`。
 struct MangaReaderView: View {
     @StateObject private var vlmEngine: VLMTranslationEngine
     @StateObject private var coordinator: TranslationRequestCoordinator
@@ -37,12 +40,13 @@ struct MangaReaderView: View {
     ]
 
     init() {
-        // 2026-09-02:預設改回 `Qwen3-VL-4B`——換小模型雖然解決了 OOM,但翻譯
-        // 品質(指令遵循能力)明顯打折。改成搭配 `TranslationRequestCoordinator`
-        // 新增的「每張圖處理完整個卸載模型」機制,拿重新載入的幾秒延遲換記憶體
-        // 保證歸零,同時保留 4B 的品質。選單還在,不想要這個延遲可以自己切回
-        // 小模型(卸載機制對所有模型都生效,不是只有 4B 才會卸載)。
+        // 2026-09-02:曾經試過「每張圖處理完整個卸載模型」換回 4B 的品質,
+        // 裝機直接 SIGABRT——卸載動作跟 Metal 命令佇列的非同步完成回呼搶時序,
+        // 引入了新的當機(比原本的 OOM 更難排查),已經整個收回。改用固定
+        // 選 `Qwen2.5-VL-3B`:retry prompt 放寬後翻譯品質已經算堪用,且不會
+        // 動到模型容器生命週期這塊、沒有額外的當機風險。
         let engine = VLMTranslationEngine()
+        engine.selectedModel = .qwen2_5VL3B
         _vlmEngine = StateObject(wrappedValue: engine)
         _coordinator = StateObject(wrappedValue: TranslationRequestCoordinator(vlmEngine: engine))
     }
