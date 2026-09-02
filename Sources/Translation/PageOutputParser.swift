@@ -69,7 +69,21 @@ enum PageOutputParser {
                     flush()
                     pending = newPending()
                 }
-                pending?.original = value(after: r, in: line)
+                let extracted = value(after: r, in: line)
+                // ⚠️ 2026-09-02 裝機實測(Qwen2.5-VL-3B):有些模型會把 ORIGINAL
+                // 跟 TRANSLATION 擠在同一行、沒有換行(例如
+                // `ORIGINAL: X TRANSLATION: Y`)。下面的 TRANSLATION 分支只認
+                // 「另起一行且行首是 TRANSLATION」,擠在同一行時 `translated`
+                // 永遠抓不到,`flush()` 會把整項判成 `isDegenerate`——這個項目
+                // 就直接被對位迴圈略過,連對不對得上都沒機會判斷。這裡先檢查
+                // 抓到的內容本身有沒有夾帶 TRANSLATION 標記,有就直接切開。
+                if let tr = extracted.range(of: "TRANSLATION", options: .caseInsensitive) {
+                    pending?.original = String(extracted[..<tr.lowerBound])
+                        .trimmingCharacters(in: .whitespaces)
+                    pending?.translated = value(after: tr, in: extracted)
+                } else {
+                    pending?.original = extracted
+                }
                 pendingLines.append(line)
                 continue
             }

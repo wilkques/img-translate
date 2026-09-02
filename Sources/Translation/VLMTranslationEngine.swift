@@ -465,6 +465,20 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
             }
         }
 
+        // ⚠️ 2026-09-02 裝機實測(換成 Qwen2.5-VL-3B 才暴露):上面逐行比對只認
+        // 「行首」的 ORIGINAL:/TRANSLATION:,是照 Qwen3-VL-4B 穩定輸出兩行的
+        // 習慣寫的。Qwen2.5-VL-3B 有時候會把兩者擠在**同一行**、中間沒有換行
+        // (例如 `ORIGINAL: YA BASTA...TRANSLATION: ya basta...`),這種情況整行
+        // 會被 `ORIGINAL:` 那個 anchored 比對整段吃掉,`translated` 永遠抓不到,
+        // 被誤判「生成失敗」觸發 retry——而 retry 的 prompt 是寫死問「音譯那聲
+        // 喊叫」,不管原文是什麼都會回一個通用喊叫音譯,導致好幾個完全不同的
+        // 原文最後都疊出同一句譯文。修法:`original` 裡如果混進了 `TRANSLATION:`
+        // 標記,從那裡切開,前半段才是真正的原文、後半段是譯文。
+        if translated.isEmpty, let r = original.range(of: "TRANSLATION:", options: .caseInsensitive) {
+            translated = String(original[r.upperBound...]).trimmingCharacters(in: .whitespaces)
+            original = String(original[..<r.lowerBound]).trimmingCharacters(in: .whitespaces)
+        }
+
         // ⚠️ 裝機實測(第九輪)抓到的關鍵事實:模型有時候**讀對也翻對了**,只是重複
         // 次數失控——底部吼叫聲那塊輸出的是 `TRANSLATION: 呀啊啊啊…(共 180 字)`。
         // 「呀啊啊啊」本來就是合格的漫畫吼叫聲譯文,舊版卻因為整段命中退化偵測就把
