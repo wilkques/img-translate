@@ -2,6 +2,7 @@ import Foundation
 import MLX
 import MLXLLM
 import MLXLMCommon
+import UIKit
 
 /// MLX Swift 本機模型翻譯引擎。
 ///
@@ -133,6 +134,20 @@ final class LocalLLMTranslationEngine: ObservableObject, TranslationEngine {
     func ensureLoaded() async throws -> ModelContainer {
         if let container { return container }
         if let loadTask { return try await loadTask.value }
+
+        // ⚠️ 2026-09-02:同一份緩解措施,見 `VLMTranslationEngine.ensureLoaded()`
+        // 的說明——`LocalModelStore.makeHubClient()` 的背景 session 實驗已經
+        // revert,這裡只用 `beginBackgroundTask` 換一點點緩衝,不保證撐過切背景。
+        var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
+        backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "text-model-download") {
+            UIApplication.shared.endBackgroundTask(backgroundTaskID)
+            backgroundTaskID = .invalid
+        }
+        defer {
+            if backgroundTaskID != .invalid {
+                UIApplication.shared.endBackgroundTask(backgroundTaskID)
+            }
+        }
 
         // 限制 MLX 的 buffer cache,LiveContainer 記憶體上限雖然實測有 ~6GB,
         // 但模型權重就佔 2.2GB,不設限的話 cache 會一路長。

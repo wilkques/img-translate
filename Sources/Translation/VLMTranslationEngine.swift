@@ -4,6 +4,7 @@ import Foundation
 import MLX
 import MLXLMCommon
 import MLXVLM
+import UIKit
 
 /// 用多模態模型(VLM)直接讀「從原圖裁下來的文字區塊」,一次完成「讀字 + 翻譯」。
 ///
@@ -511,6 +512,22 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     func ensureLoaded() async throws -> ModelContainer {
         if let container { return container }
         if let loadTask { return try await loadTask.value }
+
+        // ⚠️ 2026-09-02:`LocalModelStore.makeHubClient()` 已經改回一般
+        // session(背景 session 那次改動裝機直接崩潰,見該檔案的說明),
+        // 下載不再保證撐過切背景。這裡只做能力範圍內的緩解——用
+        // `beginBackgroundTask` 換一點點切背景瞬間的額外執行時間,不是解法,
+        // 只是讓「使用者手滑切一下背景又切回來」不會立刻整個中斷。
+        var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
+        backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "vlm-model-download") {
+            UIApplication.shared.endBackgroundTask(backgroundTaskID)
+            backgroundTaskID = .invalid
+        }
+        defer {
+            if backgroundTaskID != .invalid {
+                UIApplication.shared.endBackgroundTask(backgroundTaskID)
+            }
+        }
 
         // VLM 權重 3.1GB(比 TranslateGemma 的 2.2GB 大),cache 上限相對壓小一點。
         MLX.Memory.cacheLimit = 128 * 1024 * 1024
