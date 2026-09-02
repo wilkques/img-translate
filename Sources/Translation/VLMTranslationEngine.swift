@@ -39,14 +39,42 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         case qwen3VL2B = "Qwen3-VL-2B"
         case gemma4E2B = "Gemma 4 E2B"
         case gemma4E4B = "Gemma 4 E4B"
+        /// 2026-09-02:跟 `Gemma 4` 不是同一代架構——`Gemma 4` 掛在
+        /// `mlx-swift-lm` 3.31.4 是因為它「共享 KV 注意力」這個新架構特徵的
+        /// 載入程式碼還沒補上(見 `gemma4E2B`/`gemma4E4B` 案例),`Gemma 3`
+        /// 是上一代架構,沒有這個問題。查證 2026 年評測顯示 `Gemma 3` 在翻譯/
+        /// 多語言任務上比 `Qwen3-VL` 系列強(涵蓋 140+ 語言),用來對照
+        /// `Qwen2.5-VL-3B` 常見的「普通句子照抄不翻」這個弱點。體積跟
+        /// `Qwen3-VL-4B` 同級,連續閱讀多張圖大機率一樣會撞記憶體上限——這是
+        /// 品質比較用的選項,不是穩定性解法。
+        case gemma3_4B = "Gemma 3 4B"
+        /// 2026-09-02:Liquid AI 的 `LFM2.5-VL-3B`(2026/08 釋出)。查證重點:
+        /// 28 項視覺評測平均 69.4,追平 `InternVL-3.5-4B`、只落後 `Qwen3.5-4B`
+        /// 0.7 分——用 3B 的體積打出接近 4B 的品質;支援 16 種語言,改版重點
+        /// 就是多語言視覺理解與指令遵循能力,正對應我們卡住的「叫它翻譯卻照抄
+        /// 原文」;官方 day-one 出 MLX 格式,不是社群自己轉的。
+        ///
+        /// ⚠️ 兩個獨立的未知數,裝機才知道:
+        /// 1. **4-bit repo 沒搜到**,只確認 8-bit 存在(`-MLX-8bit`)。4-bit 這
+        ///    個 case 的 repo id 是照 8-bit 的命名慣例推測的,repo 不存在的話
+        ///    下載階段會明確報錯(不是靜默失敗),成本只是一次失敗的嘗試。
+        /// 2. **8-bit 版約 3.3GB,跟會 OOM 的 `Qwen3-VL-4B`(3.2GB)同級**,
+        ///    等於失去「體積安全」這個原本最大的賣點,大機率一樣撞記憶體上限;
+        ///    真正想要的是 4-bit 那顆(估約 1.8GB)。
+        /// 3. `LFM2.5` 是新一代骨幹,釘住的 `mlx-swift-lm` 3.31.4 裡的
+        ///    `LFM2VL.swift` 是針對上一代 `LFM2-VL` 寫的,**能不能載入新版未知**
+        ///    ——如果載入失敗且錯誤訊息長得像 `Gemma 4` 那種「key not found」,
+        ///    就是同一類上游套件還沒跟上的問題,不是我們能修的。
+        case lfm2_5VL3B_4bit = "LFM2.5-VL-3B (4bit)"
+        case lfm2_5VL3B_8bit = "LFM2.5-VL-3B (8bit)"
 
         var id: String { rawValue }
 
-        /// ⚠️ `gemma4_E2B_it_4bit`/`gemma4_E4B_it_4bit` 是透過網路搜尋找到的
-        /// `VLMRegistry` preset 名稱,沒有管道直接讀到專案釘住版本
-        /// (`mlx-swift-lm` 3.31.4)的原始碼逐字確認拼字——如果編譯錯誤說找不到
-        /// 這個屬性,去對照該 tag 的 `VLMModelFactory.swift` 修正,不是程式邏輯
-        /// 的問題。
+        /// ⚠️ `gemma4_E2B_it_4bit`/`gemma4_E4B_it_4bit`/`gemma3_4B_qat_4bit`
+        /// 都是透過網路搜尋找到的 `VLMRegistry` preset 名稱,沒有管道直接讀到
+        /// 專案釘住版本(`mlx-swift-lm` 3.31.4)的原始碼逐字確認拼字——如果
+        /// 編譯錯誤說找不到這個屬性,去對照該 tag 的 `VLMModelFactory.swift`
+        /// 修正,不是程式邏輯的問題。
         var configuration: ModelConfiguration {
             switch self {
             case .qwen3VL4B: return VLMRegistry.qwen3VL4BInstruct4Bit
@@ -57,12 +85,23 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
                     extraEOSTokens: ["<|im_end|>"])
             case .gemma4E2B: return VLMRegistry.gemma4_E2B_it_4bit
             case .gemma4E4B: return VLMRegistry.gemma4_E4B_it_4bit
+            case .gemma3_4B: return VLMRegistry.gemma3_4B_qat_4bit
+            // ⚠️ 沒有用 `VLMRegistry` preset:`LFM2.5-VL` 是 2026/08 才釋出的
+            // 新模型,釘住的 3.31.4 大機率還沒有對應的 preset 常數,直接用 repo
+            // id 指定比較保險(跟 `qwen3VL2B` 同一個寫法)。`extraEOSTokens` 刻意
+            // 留空:LFM2 系列用什麼結束標記沒查證過,亂猜一個錯的反而會讓生成
+            // 提早截斷。如果裝機發現每次都跑滿 maxTokens、輸出尾巴接一堆垃圾,
+            // 那就是缺結束標記,再回來補(`Qwen` 系列是 `<|im_end|>`)。
+            case .lfm2_5VL3B_4bit:
+                return ModelConfiguration(id: "LiquidAI/LFM2.5-VL-3B-MLX-4bit")
+            case .lfm2_5VL3B_8bit:
+                return ModelConfiguration(id: "LiquidAI/LFM2.5-VL-3B-MLX-8bit")
             }
         }
 
-        /// 顯示用的下載大小估計,只影響進度條準不準,不影響功能。Gemma 4 兩顆是
-        /// 用有效參數量推算的粗估值(MatFormer 架構打包方式可能跟 dense 4-bit
-        /// 不同),第一次真的下載完後應該回來對實際大小校正。
+        /// 顯示用的下載大小估計,只影響進度條準不準,不影響功能。Gemma 系列
+        /// 幾顆是用有效參數量推算的粗估值(MatFormer 架構打包方式可能跟
+        /// dense 4-bit 不同),第一次真的下載完後應該回來對實際大小校正。
         var approximateDownloadBytes: Int64 {
             switch self {
             case .qwen3VL4B: return 3_200_000_000    // safetensors 3.09GB + tokenizer/config
@@ -70,6 +109,9 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
             case .qwen3VL2B: return 1_780_000_000
             case .gemma4E2B: return 2_000_000_000    // 待確認,≈2B 有效參數
             case .gemma4E4B: return 3_500_000_000    // 待確認,≈4B 有效參數
+            case .gemma3_4B: return 3_000_000_000    // 待確認,抄 qwen3VL4B 起手值
+            case .lfm2_5VL3B_4bit: return 1_800_000_000  // 待確認,3.1B 參數 4-bit 推算
+            case .lfm2_5VL3B_8bit: return 3_300_000_000  // 官方講「約 3.3GB 記憶體」
             }
         }
     }
