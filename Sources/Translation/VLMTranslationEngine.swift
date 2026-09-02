@@ -54,18 +54,27 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         /// 就是多語言視覺理解與指令遵循能力,正對應我們卡住的「叫它翻譯卻照抄
         /// 原文」;官方 day-one 出 MLX 格式,不是社群自己轉的。
         ///
-        /// ⚠️ 兩個獨立的未知數,裝機才知道:
-        /// 1. **4-bit repo 沒搜到**,只確認 8-bit 存在(`-MLX-8bit`)。4-bit 這
-        ///    個 case 的 repo id 是照 8-bit 的命名慣例推測的,repo 不存在的話
-        ///    下載階段會明確報錯(不是靜默失敗),成本只是一次失敗的嘗試。
-        /// 2. **8-bit 版約 3.3GB,跟會 OOM 的 `Qwen3-VL-4B`(3.2GB)同級**,
-        ///    等於失去「體積安全」這個原本最大的賣點,大機率一樣撞記憶體上限;
-        ///    真正想要的是 4-bit 那顆(估約 1.8GB)。
-        /// 3. `LFM2.5` 是新一代骨幹,釘住的 `mlx-swift-lm` 3.31.4 裡的
-        ///    `LFM2VL.swift` 是針對上一代 `LFM2-VL` 寫的,**能不能載入新版未知**
-        ///    ——如果載入失敗且錯誤訊息長得像 `Gemma 4` 那種「key not found」,
-        ///    就是同一類上游套件還沒跟上的問題,不是我們能修的。
-        case lfm2_5VL3B_4bit = "LFM2.5-VL-3B (4bit)"
+        /// ⚠️ **2026-09-02 血的教訓:不要把「推測的」repo id 放進選單。**
+        /// 原本這裡有一個 `LFM2.5-VL-3B (4bit)`,repo id 是照 8-bit 的命名慣例
+        /// 猜的。裝機選下去直接閃退,崩潰記錄是 `EXC_BREAKPOINT`/`SIGTRAP`
+        /// (`_assertionFailure`)——**Swift 執行期 trap 沒辦法用 `try/catch`
+        /// 接住,一觸發整個 process 就死**,不會像 `Gemma 4` 那樣好好顯示
+        /// 「載入失敗」。事後查證確認 LiquidAI 跟 mlx-community 都沒有
+        /// `LFM2.5-VL-3B` 的 4-bit 版,那個 id 根本是空的。以後只放查證過
+        /// 確實存在的 repo。
+        ///
+        /// 現在留兩個**都確認存在**的:
+        /// - `1.6B-8bit`(mlx-community 轉的,約 2GB)——體積落在安全範圍
+        ///   (跟現在用的 `Qwen2.5-VL-3B` 同級),是這個系列真正值得試的那顆
+        /// - `3B-8bit`(LiquidAI 官方轉的,約 3.3GB)——品質應該最好,但體積
+        ///   跟會 OOM 的 `Qwen3-VL-4B`(3.2GB)同級,大機率一樣撞記憶體上限
+        ///
+        /// ⚠️ 仍未解的風險:`LFM2.5` 是新一代骨幹,釘住的 `mlx-swift-lm`
+        /// 3.31.4 裡的 `LFM2VL.swift` 是針對上一代 `LFM2-VL` 寫的,能不能載入
+        /// 新版未知。先試 `1.6B-8bit`——它同時驗證兩件事:repo 存在的情況下
+        /// 會不會載入成功(如果還是崩,代表是架構不支援,這條路整個關掉)。
+        case lfm2_5VL1_6B_4bit = "LFM2.5-VL-1.6B (4bit)"
+        case lfm2_5VL1_6B_8bit = "LFM2.5-VL-1.6B (8bit)"
         case lfm2_5VL3B_8bit = "LFM2.5-VL-3B (8bit)"
 
         var id: String { rawValue }
@@ -92,8 +101,10 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
             // 留空:LFM2 系列用什麼結束標記沒查證過,亂猜一個錯的反而會讓生成
             // 提早截斷。如果裝機發現每次都跑滿 maxTokens、輸出尾巴接一堆垃圾,
             // 那就是缺結束標記,再回來補(`Qwen` 系列是 `<|im_end|>`)。
-            case .lfm2_5VL3B_4bit:
-                return ModelConfiguration(id: "LiquidAI/LFM2.5-VL-3B-MLX-4bit")
+            case .lfm2_5VL1_6B_4bit:
+                return ModelConfiguration(id: "mlx-community/LFM2.5-VL-1.6B-4bit")
+            case .lfm2_5VL1_6B_8bit:
+                return ModelConfiguration(id: "mlx-community/LFM2.5-VL-1.6B-8bit")
             case .lfm2_5VL3B_8bit:
                 return ModelConfiguration(id: "LiquidAI/LFM2.5-VL-3B-MLX-8bit")
             }
@@ -110,7 +121,8 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
             case .gemma4E2B: return 2_000_000_000    // 待確認,≈2B 有效參數
             case .gemma4E4B: return 3_500_000_000    // 待確認,≈4B 有效參數
             case .gemma3_4B: return 3_000_000_000    // 待確認,抄 qwen3VL4B 起手值
-            case .lfm2_5VL3B_4bit: return 1_800_000_000  // 待確認,3.1B 參數 4-bit 推算
+            case .lfm2_5VL1_6B_4bit: return 1_100_000_000  // 待確認,8bit 版 safetensors 約 2.06GB 的一半
+            case .lfm2_5VL1_6B_8bit: return 2_100_000_000  // 同系列 8bit safetensors 實測約 2.06GB
             case .lfm2_5VL3B_8bit: return 3_300_000_000  // 官方講「約 3.3GB 記憶體」
             }
         }
@@ -597,6 +609,21 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
             }
         }
 
+        // ⚠️ 2026-09-02:真正的背景下載目前做不到——`HubClient`
+        // (`swift-huggingface`)內部用完成處理常式風格的 API,iOS 禁止在背景
+        // `URLSessionConfiguration` 上使用,09-01 那次改動裝機直接崩潰
+        // (見 `LocalModelStore.makeHubClient` 的說明),已 revert。
+        //
+        // 在不動上游的前提下,能做的是**擋掉最常見的中斷來源:螢幕自動鎖定**。
+        // 模型動輒 1-3GB,下載期間使用者多半把手機放著不管,螢幕一鎖上前景
+        // 執行時間很快就用完、下載跟著斷。下載期間關掉閒置計時器,手機放著
+        // 螢幕也不會自己暗掉,配合上面的 `beginBackgroundTask`,實務上涵蓋了
+        // 「放著等它下載完」這個主要情境。`defer` 一定要還原,不然 App 之後
+        // 整個生命週期螢幕都不會自動關,很耗電。
+        let previousIdleTimerDisabled = UIApplication.shared.isIdleTimerDisabled
+        UIApplication.shared.isIdleTimerDisabled = true
+        defer { UIApplication.shared.isIdleTimerDisabled = previousIdleTimerDisabled }
+
         // VLM 權重 3.1GB(比 TranslateGemma 的 2.2GB 大),cache 上限相對壓小一點。
         MLX.Memory.cacheLimit = 128 * 1024 * 1024
 
@@ -619,6 +646,10 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
                 throw LocalLLMError.insufficientDiskSpace(
                     needed: approximateDownloadBytes, available: available)
             }
+
+            // 下載前先確認 repo 真的存在——猜錯的 repo id 會讓底層直接 Swift
+            // trap 閃退(接不住),先問一次 API 把它變成看得到的錯誤訊息。
+            try await LocalModelStore.verifyRepositoryExists(configuration)
 
             let downloader = HubSnapshotDownloader(try LocalModelStore.makeHubClient(purpose: "vlm"))
             let tokenizerLoader = HuggingFaceTokenizerLoader()

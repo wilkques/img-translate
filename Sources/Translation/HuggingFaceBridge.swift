@@ -7,11 +7,21 @@ import Tokenizers
 
 enum HubDownloadError: LocalizedError {
     case invalidRepositoryID(String)
+    /// ⚠️ 2026-09-02 新增:選單裡放了一個「猜的」repo id
+    /// (`LiquidAI/LFM2.5-VL-3B-MLX-4bit`,事後查證根本不存在),裝機選下去
+    /// **直接閃退**——崩潰記錄是 `EXC_BREAKPOINT`/`SIGTRAP`
+    /// (`_assertionFailure`),Swift 執行期 trap 沒辦法用 `try/catch` 接住,
+    /// 一觸發整個 process 就死。為了讓「repo 不存在」變成看得到的錯誤訊息
+    /// 而不是閃退,`LocalModelStore.verifyRepositoryExists` 會在下載前先問一次
+    /// Hugging Face API,404 就丟這個錯。
+    case repositoryNotFound(String)
 
     var errorDescription: String? {
         switch self {
         case .invalidRepositoryID(let id):
             return "Hugging Face repo id 格式錯誤:'\(id)'(應為 namespace/name)"
+        case .repositoryNotFound(let id):
+            return "Hugging Face 上找不到這個模型:'\(id)'——repo id 打錯或該量化版本不存在"
         }
     }
 }

@@ -102,6 +102,40 @@ enum LocalModelStore {
         return !contents.isEmpty
     }
 
+    /// 下載前先問一次 Hugging Face API,確認這個 repo 真的存在。
+    ///
+    /// ⚠️ 2026-09-02 事故後補的防護:選單裡放了一個「照命名慣例猜的」repo id
+    /// (`LiquidAI/LFM2.5-VL-3B-MLX-4bit`,事後查證根本沒有這個 repo),裝機
+    /// 選下去**直接閃退**(`EXC_BREAKPOINT`/`SIGTRAP`,Swift 執行期 trap,
+    /// 沒辦法用 `try/catch` 接住)。有了這個檢查,同樣的情況會變成畫面上一行
+    /// 「找不到這個模型」的紅字,不會再整個 App 死掉。
+    ///
+    /// 兩個刻意的設計:
+    /// - **已經下載過就跳過檢查**:離線也要能用已經抓好的模型,不能因為連不上
+    ///   Hugging Face 就擋住。
+    /// - **只有明確的 404 才擋**:逾時、沒網路、DNS 失敗這些一律放行,讓後續
+    ///   真正的下載流程自己去處理——網路不穩不該被誤判成「模型不存在」。
+    static func verifyRepositoryExists(_ configuration: ModelConfiguration) async throws {
+        guard case .id(let repoId, revision: _) = configuration.id else { return }
+        if isModelDownloaded(configuration) { return }
+        guard let url = URL(string: "https://huggingface.co/api/models/\(repoId)") else { return }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "HEAD"
+        request.timeoutInterval = 15
+
+        let statusCode: Int
+        do {
+            let (_, response) = try await URLSession(configuration: .ephemeral).data(for: request)
+            statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+        } catch {
+            return   // 網路層失敗不擋,交給後續下載流程處理
+        }
+        if statusCode == 404 {
+            throw HubDownloadError.repositoryNotFound(repoId)
+        }
+    }
+
     /// 某顆模型目前在本機快取目錄裡實際佔用的位元組數。
     ///
     /// ⚠️ 2026-09-02 新增:下載進度百分比原本完全依賴上游 `HubClient` 的
