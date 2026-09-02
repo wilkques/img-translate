@@ -17,6 +17,7 @@ struct MangaReaderView: View {
     @StateObject private var coordinator: TranslationRequestCoordinator
     @State private var urlField = ""
     @State private var loadedURL: URL?
+    @FocusState private var isURLFieldFocused: Bool
 
     private let languageOptions: [(code: String, label: String)] = [
         ("es", "西班牙文"),
@@ -43,6 +44,7 @@ struct MangaReaderView: View {
                     .autocapitalization(.none)
                     .disableAutocorrection(true)
                     .keyboardType(.URL)
+                    .focused($isURLFieldFocused)
                     .onSubmit(loadURL)
                 Button("前往", action: loadURL)
                     .buttonStyle(.borderedProminent)
@@ -114,6 +116,7 @@ struct MangaReaderView: View {
     }
 
     private func loadURL() {
+        isURLFieldFocused = false
         guard let url = normalizedURL(from: urlField) else { return }
         loadedURL = url
     }
