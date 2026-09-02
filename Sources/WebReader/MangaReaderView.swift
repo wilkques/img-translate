@@ -173,19 +173,44 @@ struct MangaReaderView: View {
         return URL(string: "https://\(trimmed)")
     }
 
+    /// 每列預設收合,只留摘要行;展開才看得到逐區塊「Vision 辨識/VLM 讀到/
+    /// 譯文/來源」明細,樣式照抄 `ContentView` 的除錯清單。這份明細是為了
+    /// 追「兩個不同原文疊出同一句譯文」這類問題新增的(2026-09-02)——只有
+    /// 成功/失敗筆數沒辦法定位是配對邏輯錯還是模型讀錯。
     private var probeDebugList: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 4) {
                 ForEach(coordinator.probes) { probe in
-                    Text(Self.line(for: probe))
+                    if probe.blocks.isEmpty {
+                        Text(Self.line(for: probe))
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundStyle(Self.color(for: probe.status))
+                            .textSelection(.enabled)
+                    } else {
+                        DisclosureGroup {
+                            VStack(alignment: .leading, spacing: 6) {
+                                ForEach(probe.blocks) { block in
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text("Vision:\(block.visionText)")
+                                        Text("VLM讀到:\(block.recognizedText)")
+                                        Text("譯文:\(block.translatedText)")
+                                        Text("來源:\(block.source)").foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                            .padding(.top, 2)
+                        } label: {
+                            Text(Self.line(for: probe))
+                                .foregroundStyle(Self.color(for: probe.status))
+                        }
                         .font(.system(.caption2, design: .monospaced))
-                        .foregroundStyle(Self.color(for: probe.status))
                         .textSelection(.enabled)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(height: 200)
+        .frame(height: 240)
     }
 
     private static func line(for probe: TranslationRequestCoordinator.ImageProbe) -> String {

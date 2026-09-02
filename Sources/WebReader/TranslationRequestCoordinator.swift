@@ -12,6 +12,18 @@ import UIKit
 @MainActor
 final class TranslationRequestCoordinator: NSObject, ObservableObject {
 
+    /// 單一文字區塊的除錯明細,樣式照抄 `ContentView` 的除錯清單(Vision 辨識/
+    /// VLM 讀到/譯文/來源)——原本閱讀分頁只顯示「疊字 N 個區塊」的成功筆數,
+    /// 看不出區塊內容,遇到「兩個不同原文疊出同一句譯文」這種問題完全無法
+    /// 定位是配對錯誤還是模型讀錯,補上這份明細才能真的查。
+    struct BlockDebug: Identifiable {
+        let id = UUID()
+        let visionText: String
+        let recognizedText: String
+        let translatedText: String
+        let source: String
+    }
+
     struct ImageProbe: Identifiable {
         enum Status {
             case detected
@@ -24,6 +36,7 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
         let id: String
         let url: URL
         var status: Status
+        var blocks: [BlockDebug] = []
     }
 
     @Published private(set) var probes: [ImageProbe] = []
@@ -98,6 +111,11 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
         mutate(&probes[index].status)
     }
 
+    private func updateBlocks(for url: URL, _ blocks: [BlockDebug]) {
+        guard let index = indexByURL[url], probes.indices.contains(index) else { return }
+        probes[index].blocks = blocks
+    }
+
     private func resetForNewPage() {
         probes = []
         indexByURL = [:]
@@ -148,6 +166,7 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
         }
 
         var fractionalBlocks: [[String: Any]] = []
+        var blockDebugs: [BlockDebug] = []
         var usedIndices = Set<Int>()
 
         if let pageResult = try? await vlmEngine.translatePage(
@@ -168,6 +187,11 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
                     Self.fractionalPayload(
                         pixelRect: regions[i].pixelRect, text: item.translated,
                         pixelWidth: pixelWidth, pixelHeight: pixelHeight))
+                blockDebugs.append(BlockDebug(
+                    visionText: regions[i].visionText,
+                    recognizedText: item.original,
+                    translatedText: item.translated,
+                    source: "整頁(分數 \(String(format: "%.2f", bestScore)))"))
             }
         }
 
@@ -195,9 +219,16 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
                 Self.fractionalPayload(
                     pixelRect: regions[i].pixelRect, text: result.translatedText,
                     pixelWidth: pixelWidth, pixelHeight: pixelHeight))
+            blockDebugs.append(BlockDebug(
+                visionText: regions[i].visionText,
+                recognizedText: result.recognizedText,
+                translatedText: result.translatedText,
+                source: "逐塊(整頁沒對到)"))
             vlmEngine.finishPage()
         }
         vlmEngine.finishPage()
+
+        updateBlocks(for: url, blockDebugs)
 
         guard !fractionalBlocks.isEmpty else {
             updateStatus(for: url) { $0 = .failed("OCR 找到文字但翻譯全部失敗") }
