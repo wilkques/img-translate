@@ -37,10 +37,12 @@ struct MangaReaderView: View {
     ]
 
     init() {
+        // 2026-09-02:預設改回 `Qwen3-VL-4B`——換小模型雖然解決了 OOM,但翻譯
+        // 品質(指令遵循能力)明顯打折。改成搭配 `TranslationRequestCoordinator`
+        // 新增的「每張圖處理完整個卸載模型」機制,拿重新載入的幾秒延遲換記憶體
+        // 保證歸零,同時保留 4B 的品質。選單還在,不想要這個延遲可以自己切回
+        // 小模型(卸載機制對所有模型都生效,不是只有 4B 才會卸載)。
         let engine = VLMTranslationEngine()
-        // 預設換成最小的模型,見上面 2026-09-02 的說明——連續處理多張網頁圖
-        // 比「引擎測試」分頁那種一次只翻一張固定圖吃記憶體吃得多很多。
-        engine.selectedModel = .qwen3VL2B
         _vlmEngine = StateObject(wrappedValue: engine)
         _coordinator = StateObject(wrappedValue: TranslationRequestCoordinator(vlmEngine: engine))
     }
