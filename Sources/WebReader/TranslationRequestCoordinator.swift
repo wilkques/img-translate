@@ -159,7 +159,25 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
             return
         }
 
-        let regions = RegionMerger.merge(recognized, pixelWidth: pixelWidth, pixelHeight: pixelHeight)
+        // ⚠️ 2026-09-02 裝機抓到的 bug:`RegionMerger.merge` 的預設
+        // `heightInflate` 是 **1.0(完全不撐高)**,兩行字之間本來就有行距,
+        // 不撐高就永遠碰不到、永遠不會合併——實測一個對話框裡的
+        // 「NO FUE」/「TAN AGOTADOR」/「COMO PENSABA.」(其實是一整句話拆成
+        // 三行)被當成三個獨立區塊分開送去翻譯,模型拿到的是無意義的碎片,
+        // 當然翻不出東西(`VLM讀到` 全空、譯文直接把原文吐回來)。
+        //
+        // 那個 `1.0` 是當初為了修「原生疊字方框互相重疊」才改的,但網頁這條
+        // 路線的疊字是用 DOM 畫、吃的是原始 `pixelRect`,那個理由不成立。
+        // 這裡明確傳 1.5 覆寫,不動共用的預設值——「引擎測試」分頁(目前隱藏)
+        // 的原生疊字路線維持原本行為,不被這次改動波及。
+        //
+        // 選 1.5 的理由:撐大是以中心點對稱擴張,`k=1.5` 等於上下各多 25% 行高,
+        // 足以跨過一般漫畫字體 20-50% 行高的行距。**刻意偏向「寧可多合併」**——
+        // 合併過頭最多是一次看到兩個對話框(模型兩句都翻,疊字位置略偏但讀得懂),
+        // 合併不足卻會產生完全無法翻譯的碎片,後者明顯更糟。
+        let regions = RegionMerger.merge(
+            recognized, pixelWidth: pixelWidth, pixelHeight: pixelHeight,
+            heightInflate: 1.5)
         guard !regions.isEmpty else {
             updateStatus(for: url) { $0 = .noTextFound }
             return
