@@ -173,6 +173,17 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
 
         // 整頁沒對到的區塊退回逐塊路線,跟 `ContentView.runVisionPagePipeline`
         // 同一套邏輯:寧可多花一次推理,也不要把譯文綁到錯的框。
+        //
+        // ⚠️ 2026-09-02 裝機實測:連續處理第 3、4 張網頁圖時 OOM 閃退,前兩張
+        // (各 7、2 個文字區塊)撐過去了。`VLMTranslationEngine.finishPage()`
+        // 的既有註解明講「不要每塊都叫,會逼 MLX 重新配置緩衝區,反而更慢」——
+        // 那是針對「一次只處理一張固定測試圖」的情境(`ContentView`)優化的
+        // 假設。這裡的使用情境完全不同:一個閱讀 session 要連續處理**不限
+        // 張數**的網頁圖,每張圖本身可能又有好幾個區塊要各自呼叫一次逐塊
+        // fallback——舊的「每張圖結束才清一次」在這裡等於讓 Metal 快取跨越
+        // 好幾次推理持續累積,撐不到清的那一刻就先 OOM。改成每個 fallback
+        // 區塊都清一次,用推理速度換穩定性,這是這輪的實驗性修法,如果裝機
+        // 證實有效但速度明顯變慢,再考慮折衷(例如每 N 個區塊清一次)。
         for i in regions.indices where !usedIndices.contains(i) {
             let cropRect = RegionCropper.padded(
                 regions[i].pixelRect, pixelWidth: pixelWidth, pixelHeight: pixelHeight)
@@ -184,6 +195,7 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
                 Self.fractionalPayload(
                     pixelRect: regions[i].pixelRect, text: result.translatedText,
                     pixelWidth: pixelWidth, pixelHeight: pixelHeight))
+            vlmEngine.finishPage()
         }
         vlmEngine.finishPage()
 
