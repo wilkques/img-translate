@@ -42,7 +42,7 @@ git push -u origin master
 
 ## 下一步(這次不做)
 
-WKWebView 即時擷取網頁圖片(取代這次寫死的固定測試圖)、自動換頁偵測。
+WKWebView 即時擷取網頁圖片(取代這次寫死的固定測試圖)、自動換頁偵測。**2026-09-02 更新**:這塊已經開工,見文末「WKWebView 網頁圖片偵測(第一輪風險驗證)」。
 
 ## MLX 本機模型探針(Stage 0/1)✅ 已通過
 
@@ -179,3 +179,27 @@ WKWebView 即時擷取網頁圖片(取代這次寫死的固定測試圖)、自�
 解析度:589×1145 長邊 fit 1024 → 527×1024,只縮 0.89 倍幾乎原生,視覺 token 約 530,**比四次逐塊呼叫的總和還便宜**。超長條漫傳非正方形目標(1024×3072),利用 `bestFitScale = min(tw/W, th/H)` 表達「寬度 fit + 高度上限」,避免長邊 fit 把寬度壓到字糊掉。
 
 裝機驗證要看三件事(詳見 `notes/2026-08-31.md`):整頁原始輸出有沒有正確讀出兩個難字(**與對位成功與否無關**)、四列「來源」是不是都顯示「整頁」與分數多少、以及切回「逐塊VLM」確認原本翻對的兩句沒被影響。
+
+## WKWebView 網頁圖片偵測(第一輪風險驗證)
+
+在投入「網頁圖片即時翻譯」完整整合前,先驗證兩個會決定整條路線可不可行的假設(細節見 vault 端規劃文件 `AI-Vault/projects/`,由另一個對話 session 規劃、這邊落地):
+
+1. **原生端能不能真的下載到網頁上的圖**——很多漫畫站靠 Referer/Cookie 防盜鏈,單純拿網址丟 `URLSession` 常會 403 或拿到占位圖
+2. **JS 偵測到的圖片網址是不是已經是 lazy-load 換好的真實網址**——漫畫站幾乎都先塞 `data-src`,捲到才由網站自己的 JS 換成 `src`
+
+**這輪刻意不接翻譯 pipeline**,只做「偵測+下載」並把結果攤在畫面上,兩個假設都驗證過才值得投入下一輪整合。
+
+新增:
+- App 換成 `TabView`,新分頁「閱讀」是這次的重點,原本的固定測試圖畫面移到「引擎測試」分頁,兩者並存互不影響
+- `Sources/WebReader/PageBridge.swift`:注入網頁的 JS(字串常數),`IntersectionObserver`(`rootMargin` 往下多抓 2 個螢幕高度提前偵測)+ `MutationObserver`(盯 `src`/`data-src` 屬性變化等 lazy-load 換好網址、盯文件節點新增涵蓋無限捲動動態插入的圖)
+- `Sources/WebReader/MangaWebView.swift`:`UIViewRepresentable` 包 `WKWebView`,`WKUserScript` 掛在 `WKWebViewConfiguration` 上,換頁會自動重新注入,不用手動處理
+- `Sources/WebReader/TranslationRequestCoordinator.swift`:收到 JS 回報的圖片網址後,同步 `WKWebView` 目前的 cookie(`HTTPCookie.requestHeaderFields`)+ 帶 `Referer` 標頭下載,成功/失敗結果攤在除錯清單。內含 `WeakScriptMessageHandler`,避免 `WKUserContentController.add(_:name:)` 強引用造成 WebView 用完不釋放
+
+**還沒做**(等第一輪驗證過再往下):翻譯 pipeline 整合、疊字回填 DOM、序列化處理佇列、換頁/換話的持續偵測驗證。
+
+**裝機驗證要看**:
+1. 開一個 Cyril 實際會看的漫畫網址,捲動頁面,除錯清單有沒有陸續列出圖片(不是空的、也不是只列出第一屏)
+2. 每筆有沒有從「🔍 偵測到」變成「✅ ... bytes,寬×高」——出現 `❌` 要看是 HTTP 幾號(403/451 常見於防盜鏈)還是「不是可解碼的圖片」(通常代表拿到了防盜鏈的替代頁面/圖)
+3. 如果卡在 ❌,先確認該站在一般 Safari 分頁能不能正常看圖(排除單純網址失效),再回報錯誤訊息內容討論下一步(可能要調整 Cookie 同步時機、或改抓 `img.currentSrc` 以外的欄位)
+
+這輪任何一點不成立,就要回頭討論退回「使用者手動截圖丟進 App」的半自動模式,不要硬做下去。
