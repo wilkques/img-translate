@@ -12,6 +12,12 @@ import SwiftUI
 /// 兩邊都在同一個 session 裡觸發翻譯,可能同時嘗試載入模型(各自 3GB+)。
 /// 這輪先不處理(需要把引擎持有者上移到 App 層級才能共用,牽動
 /// `ContentView` 的既有結構),留給下一輪再評估要不要做。
+///
+/// ⚠️ 2026-09-02:裝機實測 Jetsam 記錄證實連續處理多張網頁圖會把 App 記憶體
+/// 推到 LiveContainer 側載環境約 6GB 的上限(`reason: per-process-limit`)。
+/// 預設模型從 `Qwen3-VL-4B`(約 3.2GB)換成最小的 `Qwen3-VL-2B`(約 1.78GB),
+/// 多留將近 1.5GB 空間給 OCR/圖片解碼/推理暫存張量,並且把模型選單加到這個
+/// 畫面,方便直接裝機比較不同模型在「連續處理多張圖」這個情境下撐不撐得住。
 struct MangaReaderView: View {
     @StateObject private var vlmEngine: VLMTranslationEngine
     @StateObject private var coordinator: TranslationRequestCoordinator
@@ -32,6 +38,9 @@ struct MangaReaderView: View {
 
     init() {
         let engine = VLMTranslationEngine()
+        // 預設換成最小的模型,見上面 2026-09-02 的說明——連續處理多張網頁圖
+        // 比「引擎測試」分頁那種一次只翻一張固定圖吃記憶體吃得多很多。
+        engine.selectedModel = .qwen3VL2B
         _vlmEngine = StateObject(wrappedValue: engine)
         _coordinator = StateObject(wrappedValue: TranslationRequestCoordinator(vlmEngine: engine))
     }
@@ -51,6 +60,8 @@ struct MangaReaderView: View {
             }
 
             languagePickers
+
+            modelPicker
 
             Text(coordinator.pageStatus)
                 .font(.caption)
@@ -87,6 +98,40 @@ struct MangaReaderView: View {
         }
         .pickerStyle(.menu)
         .font(.caption)
+    }
+
+    /// 模型選單+下載/移除按鈕,寫法照抄 `ContentView.enginePicker` 那段。
+    /// 記憶體吃緊(見上面 2026-09-02 說明)時,直接在這裡換小一點的模型
+    /// 不用重新編譯裝機。
+    private var modelPicker: some View {
+        HStack {
+            let isDownloaded = vlmEngine.downloadedModels.contains(vlmEngine.selectedModel)
+            Button(isDownloaded ? "移除模型" : "下載模型") {
+                if isDownloaded {
+                    vlmEngine.removeDownload(of: vlmEngine.selectedModel)
+                } else {
+                    Task { try? await vlmEngine.ensureLoaded() }
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(isDownloaded ? .red : .accentColor)
+
+            // 用自訂 Binding 呼叫 `changeModel(to:)`,不能直接綁 `$vlmEngine.selectedModel`
+            // ——直接綁會跳過「換模型前要先卸載舊模型」的保護,`ensureLoaded()`
+            // 可能誤用還沒卸載的舊 container,這正是這輪在追的記憶體問題,不能
+            // 再引入新的雙模型風險。寫法照抄 `ContentView.enginePicker`。
+            Picker("VLM 模型", selection: Binding(
+                get: { vlmEngine.selectedModel },
+                set: { vlmEngine.changeModel(to: $0) }
+            )) {
+                ForEach(VLMTranslationEngine.VLMModelOption.allCases) { option in
+                    Text(option.rawValue).tag(option)
+                }
+            }
+            .pickerStyle(.menu)
+            .font(.caption)
+        }
+        .onAppear { vlmEngine.refreshDownloadedModels() }
     }
 
     @ViewBuilder
