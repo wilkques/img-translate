@@ -385,18 +385,30 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     /// 只在主要 prompt 判定退化輸出(卡進重複迴圈)之後才用。刻意拿掉「逐字讀出
     /// 原文」這一步——那正是卡迴圈的根源(來源文字本身重複字母極多),既然已經
     /// 判定原文讀不出來也沒關係(這種案例反正是狀聲詞,讀不出精確原文不影響回填
-    /// 使用者看到的翻譯結果),retry 只要求一件事:直接給音譯,不要求對照原文。
+    /// 使用者看到的翻譯結果),retry 只要求一件事:直接給翻譯,不要求對照原文。
     /// 這次搭配的圖也換成範圍大很多的裁圖(見 `translateRegion`),所以額外提醒
-    /// 模型只翻譯圖中「那句喊叫/狀聲詞」,不要連分鏡裡其他文字或畫面內容一起講。
+    /// 模型只翻譯圖中「那句話」,不要連分鏡裡其他文字或畫面內容一起講。
+    ///
+    /// ⚠️ 2026-09-02:原本這段寫死「這裡一定有一聲喊叫,給音譯」——這個假設是
+    /// 針對 `Qwen3-VL-4B` 當初「難字才會觸發 retry」設計的。裝機實測換成
+    /// `Qwen2.5-VL-3B` 後發現:這顆模型連普通句子(`ERES RUIDOSO...`,一句話,
+    /// 不是喊叫)都常常在主要路線判定失敗、觸發 retry,retry 卻只會問「音譯那聲
+    /// 喊叫」,對正常句子文不對題,吐出跟原文完全對不上的通用喊叫音譯。改成
+    /// 「可能是普通句子、也可能是喊叫,兩種都給合理翻譯」,不預設一定是喊叫——
+    /// 仍然保留「如果是喊叫就音譯」這條指示,不影響 `Qwen3-VL-4B` 原本靠這段
+    /// prompt 救回來的難字案例(那類案例的圖片內容本身就是喊叫,模型看得出來)。
     private static func makeRetryPrompt(target: String) -> String {
         """
         This image is a panel from a comic page, shown with extra surrounding context. \
-        Somewhere in it is a shout or a sound effect written in a stylised hand-lettered \
-        bold font, possibly with many repeated letters (for example a scream).
+        Somewhere in it is a piece of dialogue or a sound effect written in a stylised \
+        hand-lettered bold font. It may be an ordinary sentence, or it may be a shout \
+        with many repeated letters (for example a scream).
 
-        Give a short, natural \(target) transliteration of just that shout/sound effect \
-        (not any other text or the scene itself). Keep any repeated sound short (2-4 \
-        repeats is enough) — do not try to match the exact number of repeats in the image.
+        Give a short, natural \(target) translation of just that text (not any other \
+        text or the scene itself). If it is a shout or sound effect, transliterate the \
+        sound instead of translating its literal meaning, and keep any repeated sound \
+        short (2-4 repeats is enough) — do not try to match the exact number of repeats \
+        in the image.
 
         Reply with exactly one line and nothing else, no explanation, no quotes:
         TRANSLATION: <the \(target) text>
