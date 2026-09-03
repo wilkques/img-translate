@@ -284,17 +284,35 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         temperature: 0.2
     )
 
+    /// ⚠️ 2026-09-03 裝機驗證(第一版 prompt)抓到三個問題:
+    /// 1. 好幾筆譯文被套上實體角括號(`<巴別了>`、`<你很吵闹......>`)——原本的
+    ///    範例格式 `TRANSLATION: <the target text>` 用角括號當佔位符號,模型
+    ///    把角括號本身也照抄進輸出裡,不是當成「這裡填文字」的記號。改成給一個
+    ///    **具體範例**(真的示範一句話怎麼翻)取代抽象佔位符號,不用角括號。
+    /// 2. 有一筆(`NA MLGYEOM`)直接用英文解釋「The Traditional Chinese text
+    ///    is: 貓咪叫聲」,完全沒有照格式回答——加強「不要解釋、不要描述」的
+    ///    措辭。
+    /// 3. 有一筆(`¡UWA! ¡¡UWAA!! IIIUWAAA!!!`)原封不動照抄原文,沒有真的
+    ///    翻譯或音譯——明講「一定要給出真正的翻譯,不能原封不動照抄」。
+    /// 這三點都是同一份全新 prompt 的第一次調整,不是動 `makePrompt`/
+    /// `makeRetryPrompt` 那兩份已經裝機驗證很多輪的既有 prompt。
     private static func makeTextOnlyPrompt(source: String, target: String, text: String) -> String {
         """
-        Translate the following \(source) comic dialogue into \(target). It may be an \
-        ordinary sentence, or it may be a shout or sound effect written with repeated \
-        letters — if so, transliterate the sound into \(target) instead of translating \
-        its literal meaning, and keep any repeated sound short (2-4 repeats is enough).
+        Translate the following \(source) comic dialogue into \(target). You must always \
+        give an actual \(target) translation — never leave the text unchanged or just copy \
+        the original as your answer, and never explain or describe what the text says. \
+        It may be an ordinary sentence, or it may be a shout or sound effect written with \
+        repeated letters — if so, transliterate the sound into \(target) instead of \
+        translating its literal meaning, and keep any repeated sound short (2-4 repeats is \
+        enough).
 
         Text: \(text)
 
-        Reply with exactly one line and nothing else, no explanation, no quotes:
-        TRANSLATION: <the \(target) text>
+        Reply with exactly one line, nothing else: the word TRANSLATION, a colon, a space, \
+        then only the \(target) text itself — no angle brackets, no quotes, no explanation. \
+        For example, if the text was "HOLA" and the target language was Chinese, the correct \
+        whole reply is:
+        TRANSLATION: 你好
         """
     }
 
@@ -313,6 +331,14 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         if translated.isEmpty {
             translated = raw.replacingOccurrences(of: "```", with: "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        // 防呆:即使 prompt 已經改成具體範例、明講不要加角括號,模型偶爾還是
+        // 可能把舊習慣的佔位符號格式帶進來(裝機實測案例:"<巴別了>"、
+        // "<你很吵闹......>")。這裡多一層保險去掉包住整段文字的角括號,
+        // 不影響本來就沒有括號的正常輸出。
+        if translated.hasPrefix("<"), translated.hasSuffix(">"), translated.count >= 2 {
+            translated = String(translated.dropFirst().dropLast())
+                .trimmingCharacters(in: .whitespaces)
         }
         if PageOutputParser.isDegenerateLine(translated) {
             translated = PageOutputParser.collapseRepeats(translated)
