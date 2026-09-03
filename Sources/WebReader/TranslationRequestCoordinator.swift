@@ -75,9 +75,14 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
     /// 2026-09-03:純文字模式(`useTextOnlyTranslation`)用的上下文記憶——
     /// 跨整個閱讀 session(不是只在同一張圖內)累積最近翻過的「原文→譯文」,
     /// 讓模型有機會維持人名/語氣一致性。`resetForNewPage` 換頁會清空(新的
-    /// 一話沒理由沿用上一話的上下文)。只保留最後幾筆,避免提示越滾越長。
+    /// 一話沒理由沿用上一話的上下文)。
+    ///
+    /// Cyril 要求從 6 拉到 20——沒有圖片 token 的路線,20 行文字對提示長度
+    /// 影響還算小,但每次呼叫要多讀的內容變多,裝機驗證要留意速度有沒有
+    /// 明顯變慢,以及行數變多會不會讓模型更容易把上下文內容也一起吐出來
+    /// (「僅供參考」這句指示原本是針對 6 行測的,行數變多沒重新驗證過)。
     private var recentTextTranslations: [(original: String, translated: String)] = []
-    private static let maxContextLines = 6
+    private static let maxContextLines = 20
 
     init(vlmEngine: VLMTranslationEngine) {
         self.vlmEngine = vlmEngine
