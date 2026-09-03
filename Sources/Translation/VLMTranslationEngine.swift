@@ -553,7 +553,9 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         // 適合把整段原始輸出當譯文救回來;`original` 有值但 `translated` 沒有,代表
         // 模型卡在讀原文階段,`translated` 要保持空字串,才能讓下面的
         // `hasUsableContent` 正確判定失敗、真正觸發 retry。
+        var usedRawFallback = false
         if translated.isEmpty && original.isEmpty {
+            usedRawFallback = true
             let fallback = raw
                 .replacingOccurrences(of: "```", with: "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -564,6 +566,22 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
 
         // 收斂之後還是沒有任何文字內容(例如整段只剩一堆 `¡` 或 `!!!`)才算真的失敗。
         guard PageOutputParser.hasUsableContent(translated) else {
+            return ImageRegionTranslation(
+                recognizedText: original, translatedText: failureMessage, rawOutput: raw)
+        }
+
+        // ⚠️ 2026-09-03:上面那個「兩者皆空」的 fallback,原本的假設是「模型
+        // 可能沒照格式、但裸寫的內容或許是個有效答案,值得搶救」。裝機實測
+        // 至今看到的所有案例(`VAMONOS.`、疑似角色名 `NA MUGYEOM`),這個分支
+        // 救回來的都是**模型完全沒有嘗試翻譯、原封不動照抄輸入**,不是「忘記
+        // 加標籤但翻對了」。Cyril 已經拍板人名也要音譯,代表「輸出等於輸入」
+        // 在任何情況下都不是正確答案,原本「可能是專有名詞正確保留」的顧慮
+        // 不成立——不再搶救,直接判定失敗,交給 `translateRegion` 既有的
+        // 寬裁圖 retry 處理。**這是純邏輯改動,沒有動任何 prompt 文字**,跟
+        // 上次「加一句人名指示到 prompt 裡」那次裝機證實負分的做法不是同一
+        // 條路,不應該重蹈那次的覆轍(但仍要照方法論獨立裝機驗證,不能省略,
+        // 尤其要確認 `YA BASTA`/`ERES RUIDOSO` 這些已經翻對的句子沒有被拖累)。
+        if usedRawFallback {
             return ImageRegionTranslation(
                 recognizedText: original, translatedText: failureMessage, rawOutput: raw)
         }
