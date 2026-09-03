@@ -75,6 +75,12 @@ struct MangaReaderView: View {
 
             modelPicker
 
+            // 2026-09-03:實驗開關,測試「OCR 文字直接丟 VLM 翻譯」能不能取代
+            // 較慢的讀圖路線,見 `TranslationRequestCoordinator.useTextOnlyTranslation`
+            // 的說明。放在這裡方便跟語言/模型選單一起看,不用捲到除錯清單才找得到。
+            Toggle("純文字模式(實驗:跳過讀圖,OCR 文字直接翻)", isOn: $coordinator.useTextOnlyTranslation)
+                .font(.caption2)
+
             HStack {
                 Text(coordinator.pageStatus)
                     .font(.caption2)

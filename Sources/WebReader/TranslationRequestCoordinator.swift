@@ -52,6 +52,12 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
     @Published private(set) var isPreTranslating = false
     @Published private(set) var preTranslateTotal: Int?
 
+    /// 2026-09-03:實驗開關——開著時 `runTranslation` 完全跳過整頁/逐塊讀圖
+    /// 路線,改成 Vision OCR 文字直接丟 VLM 純文字翻譯(`VLMTranslationEngine.
+    /// translateText`)。用來對照「文字路線」跟「讀圖路線」的速度/品質,方便
+    /// 同一顆 build 上直接切換比較,不用等兩次 CI。
+    @Published var useTextOnlyTranslation = false
+
     weak var webView: WKWebView?
     let vlmEngine: VLMTranslationEngine
 
@@ -259,6 +265,42 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
 
         var fractionalBlocks: [[String: Any]] = []
         var blockDebugs: [BlockDebug] = []
+
+        // ⚠️ 2026-09-03:**實驗性路線**——測試「Vision OCR(已經關掉語言校正,
+        // 準確率提升)夠準的話,直接把 OCR 文字丟給 VLM 純文字翻譯,不用繞去
+        // 讀裁圖」這個假設。開著這個開關時完全跳過下面的整頁 VLM 讀圖 + 逐塊
+        // 讀圖 fallback,改成每個區塊都呼叫 `VLMTranslationEngine.translateText`
+        // (見該檔案的說明)。這是為了乾淨對照兩條路線,不要混在一起跑。
+        if useTextOnlyTranslation {
+            for region in regions {
+                guard let translated = try? await vlmEngine.translateText(
+                    region.visionText, from: sourceLanguage, to: targetLanguage) else {
+                    blockDebugs.append(BlockDebug(
+                        visionText: region.visionText, recognizedText: region.visionText,
+                        translatedText: VLMTranslationEngine.failureMessage, source: "純文字,失敗"))
+                    continue
+                }
+                blockDebugs.append(BlockDebug(
+                    visionText: region.visionText, recognizedText: region.visionText,
+                    translatedText: translated,
+                    source: translated == VLMTranslationEngine.failureMessage ? "純文字,失敗" : "純文字"))
+                guard translated != VLMTranslationEngine.failureMessage else { continue }
+                fractionalBlocks.append(
+                    Self.fractionalPayload(
+                        pixelRect: region.pixelRect, text: translated,
+                        pixelWidth: pixelWidth, pixelHeight: pixelHeight))
+            }
+            vlmEngine.finishPage()
+            updateBlocks(for: url, blockDebugs)
+            guard !fractionalBlocks.isEmpty else {
+                updateStatus(for: url) { $0 = .failed("OCR 找到文字但翻譯全部失敗") }
+                return
+            }
+            updateStatus(for: url) { $0 = .translated(blockCount: fractionalBlocks.count) }
+            await applyOverlay(elementId: elementId, blocks: fractionalBlocks)
+            return
+        }
+
         var usedIndices = Set<Int>()
 
         if let pageResult = try? await vlmEngine.translatePage(

@@ -245,6 +245,82 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         return firstAttempt
     }
 
+    /// ⚠️ 2026-09-03:**實驗性路線**,測試「Vision OCR 準確率夠高的話,直接
+    /// 翻文字比繞去讀裁圖快很多」這個假設(見 `notes/2026-09-03.md`)。跟
+    /// `translateRegion`(讀裁圖)是兩條完全獨立的路線,互不影響,呼叫端
+    /// (`TranslationRequestCoordinator`)用一個開關選擇要走哪條。
+    ///
+    /// 這是同一個已載入的 VLM container(Qwen2.5-VL-3B),不是另外接
+    /// `LocalLLMTranslationEngine`(TranslateGemma)那顆獨立模型——兩顆模型
+    /// 同時載入記憶體太緊,先前已經因為這個理由拿掉雙引擎並存的設計,不要
+    /// 重蹈覆轍。呼叫方式是同一個 `UserInput`/`Chat.Message.user`,只是
+    /// `images:` 傳空陣列——這顆模型本身是通用 instruct VLM,純文字對話
+    /// 理論上是最基本的使用情境,但**這個專案裡從沒有人這樣呼叫過**,是否
+    /// 真的支援、會不會在轉圖片 token 的路徑上出問題,只能裝機驗證確認。
+    ///
+    /// 刻意**沒有**重試機制(跟 `translateRegion` 不同)——這輪只是驗證基本
+    /// 假設成不成立,先看單次呼叫的品質/速度,不要一次疊加太多變因。
+    func translateText(_ text: String, from source: String, to target: String) async throws -> String {
+        let sourceName = try LanguageNames.name(for: source)
+        let targetName = try LanguageNames.name(for: target)
+        let container = try await ensureLoaded()
+        let prompt = Self.makeTextOnlyPrompt(source: sourceName, target: targetName, text: text)
+
+        let userInput = UserInput(chat: [.user(prompt, images: [])])
+        let lmInput = try await container.prepare(input: userInput)
+        let stream = try await container.generate(input: lmInput, parameters: textOnlyGenerateParameters)
+
+        var raw = ""
+        for await event in stream {
+            if let chunk = event.chunk { raw += chunk }
+        }
+        return Self.parseTextOnly(raw.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// 比 `generateParameters` 小很多——沒有圖片 token、沒有「先讀原文」這個
+    /// 步驟,單行翻譯結果理論上不需要 150 token 額度。
+    private let textOnlyGenerateParameters = GenerateParameters(
+        maxTokens: 60,
+        temperature: 0.2
+    )
+
+    private static func makeTextOnlyPrompt(source: String, target: String, text: String) -> String {
+        """
+        Translate the following \(source) comic dialogue into \(target). It may be an \
+        ordinary sentence, or it may be a shout or sound effect written with repeated \
+        letters — if so, transliterate the sound into \(target) instead of translating \
+        its literal meaning, and keep any repeated sound short (2-4 repeats is enough).
+
+        Text: \(text)
+
+        Reply with exactly one line and nothing else, no explanation, no quotes:
+        TRANSLATION: <the \(target) text>
+        """
+    }
+
+    /// 跟 `parse(_:)` 共用同一套退化偵測/收斂邏輯(`PageOutputParser`),但
+    /// 只解析單一 `TRANSLATION:` 行——這條路線沒有 `ORIGINAL:`,原文本來就是
+    /// 呼叫端傳進來的 Vision OCR 文字,不需要模型再讀一次。
+    private nonisolated static func parseTextOnly(_ raw: String) -> String {
+        var translated = ""
+        for line in raw.split(whereSeparator: \.isNewline) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if let r = trimmed.range(of: "TRANSLATION:", options: [.caseInsensitive, .anchored]) {
+                translated = String(trimmed[r.upperBound...]).trimmingCharacters(in: .whitespaces)
+                break
+            }
+        }
+        if translated.isEmpty {
+            translated = raw.replacingOccurrences(of: "```", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if PageOutputParser.isDegenerateLine(translated) {
+            translated = PageOutputParser.collapseRepeats(translated)
+        }
+        guard PageOutputParser.hasUsableContent(translated) else { return failureMessage }
+        return translated
+    }
+
     /// 整頁一次讀完(見 `ImageTranslationEngine.translatePage` 的說明)。
     func translatePage(
         _ page: CGImage,
