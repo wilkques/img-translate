@@ -72,6 +72,13 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
     private var pendingJobs: [(url: URL, image: UIImage)] = []
     private var isProcessingQueue = false
 
+    /// 2026-09-03:純文字模式(`useTextOnlyTranslation`)用的上下文記憶——
+    /// 跨整個閱讀 session(不是只在同一張圖內)累積最近翻過的「原文→譯文」,
+    /// 讓模型有機會維持人名/語氣一致性。`resetForNewPage` 換頁會清空(新的
+    /// 一話沒理由沿用上一話的上下文)。只保留最後幾筆,避免提示越滾越長。
+    private var recentTextTranslations: [(original: String, translated: String)] = []
+    private static let maxContextLines = 6
+
     init(vlmEngine: VLMTranslationEngine) {
         self.vlmEngine = vlmEngine
     }
@@ -201,6 +208,7 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
         pendingJobs = []
         isPreTranslating = false
         preTranslateTotal = nil
+        recentTextTranslations = []
     }
 
     // MARK: - 序列化翻譯佇列
@@ -274,7 +282,8 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
         if useTextOnlyTranslation {
             for region in regions {
                 guard let translated = try? await vlmEngine.translateText(
-                    region.visionText, from: sourceLanguage, to: targetLanguage) else {
+                    region.visionText, from: sourceLanguage, to: targetLanguage,
+                    context: recentTextTranslations) else {
                     blockDebugs.append(BlockDebug(
                         visionText: region.visionText, recognizedText: region.visionText,
                         translatedText: VLMTranslationEngine.failureMessage, source: "純文字,失敗"))
@@ -285,6 +294,12 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
                     translatedText: translated,
                     source: translated == VLMTranslationEngine.failureMessage ? "純文字,失敗" : "純文字"))
                 guard translated != VLMTranslationEngine.failureMessage else { continue }
+                // 只有真的翻成功才存進上下文——失敗訊息本身不是有效的譯文,
+                // 存進去只會誤導後面的呼叫。
+                recentTextTranslations.append((original: region.visionText, translated: translated))
+                if recentTextTranslations.count > Self.maxContextLines {
+                    recentTextTranslations.removeFirst()
+                }
                 fractionalBlocks.append(
                     Self.fractionalPayload(
                         pixelRect: region.pixelRect, text: translated,

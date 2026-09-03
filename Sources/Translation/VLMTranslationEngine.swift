@@ -260,11 +260,22 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     ///
     /// 刻意**沒有**重試機制(跟 `translateRegion` 不同)——這輪只是驗證基本
     /// 假設成不成立,先看單次呼叫的品質/速度,不要一次疊加太多變因。
-    func translateText(_ text: String, from source: String, to target: String) async throws -> String {
+    ///
+    /// ⚠️ 2026-09-03:`context` 是這輪新加的——每個對話框原本是完全獨立的
+    /// 一次呼叫,模型不知道同一話裡其他對話框翻了什麼,人名音譯、代名詞、
+    /// 語氣容易每格不一致。呼叫端(`TranslationRequestCoordinator`)會傳進
+    /// 最近幾筆「原文→譯文」當參考,幫模型維持一致性。純文字模式才加這個
+    /// ——沒有圖片 token 的負擔,多幾行文字提示成本很低;`translateRegion`
+    /// (讀圖路線)那兩份已經裝機驗證很多輪的 prompt 不動,风险太高不值得。
+    func translateText(
+        _ text: String, from source: String, to target: String,
+        context: [(original: String, translated: String)] = []
+    ) async throws -> String {
         let sourceName = try LanguageNames.name(for: source)
         let targetName = try LanguageNames.name(for: target)
         let container = try await ensureLoaded()
-        let prompt = Self.makeTextOnlyPrompt(source: sourceName, target: targetName, text: text)
+        let prompt = Self.makeTextOnlyPrompt(
+            source: sourceName, target: targetName, text: text, context: context)
 
         let userInput = UserInput(chat: [.user(prompt, images: [])])
         let lmInput = try await container.prepare(input: userInput)
@@ -296,9 +307,30 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     ///    翻譯或音譯——明講「一定要給出真正的翻譯,不能原封不動照抄」。
     /// 這三點都是同一份全新 prompt 的第一次調整,不是動 `makePrompt`/
     /// `makeRetryPrompt` 那兩份已經裝機驗證很多輪的既有 prompt。
-    private static func makeTextOnlyPrompt(source: String, target: String, text: String) -> String {
-        """
-        Translate the following \(source) comic dialogue into \(target). You must always \
+    ///
+    /// ⚠️ 2026-09-03:加了 `context`(最近幾筆已翻過的原文→譯文)幫模型維持
+    /// 人名/語氣一致性。刻意放在提示**最前面**、跟主要指令用空行隔開,且明講
+    /// 「僅供參考、不是要翻譯的內容」——避免模型把上下文那幾行也當成這次要
+    /// 翻譯的文字混進輸出裡。`context` 是空陣列時這段完全不出現,不影響原本
+    /// 已經驗證過的行為。
+    private static func makeTextOnlyPrompt(
+        source: String, target: String, text: String,
+        context: [(original: String, translated: String)]
+    ) -> String {
+        var contextBlock = ""
+        if !context.isEmpty {
+            let lines = context.map { "\($0.original) => \($0.translated)" }.joined(separator: "\n")
+            contextBlock = """
+            For reference only (already translated earlier in this same comic chapter, \
+            so you can keep character names, tone and pronouns consistent with them — \
+            these are NOT the text to translate now):
+            \(lines)
+
+
+            """
+        }
+        return """
+        \(contextBlock)Translate the following \(source) comic dialogue into \(target). You must always \
         give an actual \(target) translation — never leave the text unchanged or just copy \
         the original as your answer, and never explain or describe what the text says. \
         It may be an ordinary sentence, or it may be a shout or sound effect written with \
