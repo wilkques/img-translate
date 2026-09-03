@@ -231,18 +231,27 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
                 regions[i].pixelRect, pixelWidth: pixelWidth, pixelHeight: pixelHeight)
             guard let crop = RegionCropper.crop(page, toPixelRect: cropRect) else { continue }
             guard let result = try? await vlmEngine.translateRegion(
-                crop, widerContext: pageCG, from: sourceLanguage, to: targetLanguage),
-                result.translatedText != VLMTranslationEngine.failureMessage else { continue }
-            fractionalBlocks.append(
-                Self.fractionalPayload(
-                    pixelRect: regions[i].pixelRect, text: result.translatedText,
-                    pixelWidth: pixelWidth, pixelHeight: pixelHeight))
+                crop, widerContext: pageCG, from: sourceLanguage, to: targetLanguage) else {
+                vlmEngine.finishPage()
+                continue
+            }
+            // ⚠️ 2026-09-03:原本失敗(`translatedText == failureMessage`)直接
+            // `continue`,完全不記錄除錯明細——結果是「OCR 找到文字但翻譯全部
+            // 失敗」這種整張圖失敗的狀態,展開明細是空的,看不出模型當下到底
+            // 吐了什麼、是不是又是照抄或卡迴圈。改成失敗也記一筆(`來源` 標
+            // 「失敗」),只是不疊字、不算進 `fractionalBlocks`。
             blockDebugs.append(BlockDebug(
                 visionText: regions[i].visionText,
                 recognizedText: result.recognizedText,
                 translatedText: result.translatedText,
-                source: "逐塊(整頁沒對到)"))
+                source: result.translatedText == VLMTranslationEngine.failureMessage
+                    ? "逐塊,翻譯失敗" : "逐塊(整頁沒對到)"))
             vlmEngine.finishPage()
+            guard result.translatedText != VLMTranslationEngine.failureMessage else { continue }
+            fractionalBlocks.append(
+                Self.fractionalPayload(
+                    pixelRect: regions[i].pixelRect, text: result.translatedText,
+                    pixelWidth: pixelWidth, pixelHeight: pixelHeight))
         }
         vlmEngine.finishPage()
 
