@@ -104,6 +104,21 @@ struct MangaReaderView: View {
                 }
                 .font(.caption2)
                 .disabled(coordinator.isPreTranslating || loadedURL == nil)
+
+                // 2026-09-03:Cyril 要求可以暫停/繼續——只擋佇列啟動下一個
+                // 工作,不中斷正在跑的那一個,見 `TranslationRequestCoordinator.
+                // pauseTranslation`/`resumeTranslation` 的說明。兩種開始翻譯
+                // 的方式(開始翻譯/翻譯整話)都會打開 `isAutoTranslateEnabled`,
+                // 用同一個開關判斷這顆按鈕該不該顯示可按。
+                Button(coordinator.isPaused ? "繼續" : "暫停") {
+                    if coordinator.isPaused {
+                        coordinator.resumeTranslation()
+                    } else {
+                        coordinator.pauseTranslation()
+                    }
+                }
+                .font(.caption2)
+                .disabled(!coordinator.isAutoTranslateEnabled)
             }
 
             ZStack {

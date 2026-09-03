@@ -67,6 +67,13 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
     /// 那條路線本身就是主動按鈕觸發,沒理由讓它被這個新加的擋門檻卡住。
     @Published private(set) var isAutoTranslateEnabled = false
 
+    /// 2026-09-03:暫停/繼續——只擋「排隊佇列要不要啟動下一個工作」
+    /// (`processQueueIfNeeded`),不中斷已經在跑的那一個推理(VLM 的串流生成
+    /// 沒有中途暫停的機制,硬中斷容易留下不一致狀態,不值得為了這個做)。
+    /// 暫停時新圖片一樣可以被偵測、下載(下載便宜,不是瓶頸),只是不會真的
+    /// 排進去跑推理,直到 `resumeTranslation()` 被呼叫。
+    @Published private(set) var isPaused = false
+
     weak var webView: WKWebView?
     let vlmEngine: VLMTranslationEngine
 
@@ -239,12 +246,13 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
         preTranslateTotal = nil
         recentTextTranslations = []
         isAutoTranslateEnabled = false
+        isPaused = false
     }
 
     // MARK: - 序列化翻譯佇列
 
     private func processQueueIfNeeded() {
-        guard !isProcessingQueue, !pendingJobs.isEmpty else { return }
+        guard !isProcessingQueue, !isPaused, !pendingJobs.isEmpty else { return }
         isProcessingQueue = true
         let job = pendingJobs.removeFirst()
         Task {
@@ -252,6 +260,19 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
             isProcessingQueue = false
             processQueueIfNeeded()
         }
+    }
+
+    /// 暫停——目前正在跑的那一個區塊/圖片會跑完,之後佇列裡等著的工作
+    /// 不會繼續啟動,直到按繼續。
+    func pauseTranslation() {
+        isPaused = true
+    }
+
+    /// 繼續——重新讓佇列有機會啟動下一個等著的工作。
+    func resumeTranslation() {
+        guard isPaused else { return }
+        isPaused = false
+        processQueueIfNeeded()
     }
 
     private func runTranslation(url: URL, image: UIImage) async {
