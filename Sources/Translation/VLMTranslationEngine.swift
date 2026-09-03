@@ -37,18 +37,29 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         case qwen3VL4B = "Qwen3-VL-4B"
         case qwen2_5VL3B = "Qwen2.5-VL-3B"
         case qwen3VL2B = "Qwen3-VL-2B"
-        case gemma4E2B = "Gemma 4 E2B"
-        case gemma4E4B = "Gemma 4 E4B"
         /// 2026-09-02:跟 `Gemma 4` 不是同一代架構——`Gemma 4` 掛在
         /// `mlx-swift-lm` 3.31.4 是因為它「共享 KV 注意力」這個新架構特徵的
-        /// 載入程式碼還沒補上(見 `gemma4E2B`/`gemma4E4B` 案例),`Gemma 3`
-        /// 是上一代架構,沒有這個問題。查證 2026 年評測顯示 `Gemma 3` 在翻譯/
-        /// 多語言任務上比 `Qwen3-VL` 系列強(涵蓋 140+ 語言),用來對照
-        /// `Qwen2.5-VL-3B` 常見的「普通句子照抄不翻」這個弱點。體積跟
-        /// `Qwen3-VL-4B` 同級,連續閱讀多張圖大機率一樣會撞記憶體上限——這是
-        /// 品質比較用的選項,不是穩定性解法。
+        /// 載入程式碼還沒補上,`Gemma 3` 是上一代架構,沒有這個問題。查證
+        /// 2026 年評測顯示 `Gemma 3` 在翻譯/多語言任務上比 `Qwen3-VL` 系列強
+        /// (涵蓋 140+ 語言),用來對照 `Qwen2.5-VL-3B` 常見的「普通句子照抄
+        /// 不翻」這個弱點。體積跟 `Qwen3-VL-4B` 同級,連續閱讀多張圖大機率
+        /// 一樣會撞記憶體上限——這是品質比較用的選項,不是穩定性解法。
         case gemma3_4B = "Gemma 3 4B"
-        // ⚠️ 2026-09-03:整個 `LFM2.5-VL` 系列已移除,不要再加回來。
+        // ⚠️ 2026-09-03:`Gemma 4 E2B`/`E4B` 已從選單移除,不要再加回來。
+        //
+        // 兩顆都確認下載成功但**載入失敗**(`VLMRegistry.gemma4_E2B_it_4bit`/
+        // `gemma4_E4B_it_4bit`,已裝機驗證存在)——根因是 `mlx-swift-lm`
+        // 3.31.4 對 Gemma 4 架構「共享 KV 尾端層」的 k_norm 形狀處理有 bug
+        // (上游已知,見 `ml-explore/mlx-lm` issue #1210、`ml-explore/
+        // mlx-swift-lm` issue #282),不是我們的程式碼能修的。2026-09-03
+        // 裝機再測 E4B(檔案已經下載過,這次是重新載入快取檔案觸發的):
+        // 這次沒有乾淨丟出可捕捉的錯誤,而是整個卡住不動(「下載 0%」卡死、
+        // 後面排隊的翻譯工作跟著卡住),比先前紀錄的「載入失敗訊息」更糟。
+        // 跟 `Gemma 3 4B` 是完全不同世代架構,不要混淆。
+        //
+        // 之後要重新評估的前提:`mlx-swift-lm` 升級到修掉這個 k_norm bug 的
+        // 版本,不是換 repo id 或量化版本能解決的。
+        // ⚠️ 整個 `LFM2.5-VL` 系列也已移除,不要再加回來。
         //
         // 兩次裝機都是同一種閃退(`EXC_BREAKPOINT`/`SIGTRAP` →
         // `_assertionFailure`,同一條呼叫鏈):
@@ -84,8 +95,6 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
                 return ModelConfiguration(
                     id: "mlx-community/Qwen3-VL-2B-Instruct-4bit",
                     extraEOSTokens: ["<|im_end|>"])
-            case .gemma4E2B: return VLMRegistry.gemma4_E2B_it_4bit
-            case .gemma4E4B: return VLMRegistry.gemma4_E4B_it_4bit
             case .gemma3_4B: return VLMRegistry.gemma3_4B_qat_4bit
             }
         }
@@ -98,8 +107,6 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
             case .qwen3VL4B: return 3_200_000_000    // safetensors 3.09GB + tokenizer/config
             case .qwen2_5VL3B: return 2_000_000_000  // 待確認
             case .qwen3VL2B: return 1_780_000_000
-            case .gemma4E2B: return 2_000_000_000    // 待確認,≈2B 有效參數
-            case .gemma4E4B: return 3_500_000_000    // 待確認,≈4B 有效參數
             case .gemma3_4B: return 3_000_000_000    // 待確認,抄 qwen3VL4B 起手值
             }
         }
