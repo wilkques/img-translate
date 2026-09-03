@@ -314,36 +314,26 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
             // 失敗」這種整張圖失敗的狀態,展開明細是空的,看不出模型當下到底
             // 吐了什麼、是不是又是照抄或卡迴圈。改成失敗也記一筆(`來源` 標
             // 「失敗」),只是不疊字、不算進 `fractionalBlocks`。
-            var finalTranslated = result.translatedText
-            var source = result.translatedText == VLMTranslationEngine.failureMessage
+            //
+            // ⚠️ 2026-09-03:曾經在這裡接過 Google 翻譯備援(本機模型失敗時
+            // 改送文字去 Google 免費端點翻譯),裝機實測發現這個免費端點會被
+            // Google 的濫用防護擋下來(`HTTP 429`),試過加呼叫間隔節流也沒用
+            // ——裝置所在網路的 IP 應該已經被標記。Cyril 確認放棄這條備援,
+            // 失敗就是失敗,交給使用者用既有的手動重試按鈕自己決定要不要
+            // 再試一次。`GoogleTranslateFallback.swift` 已整個移除,不要再
+            // 加回來,除非之後真的要換官方付費 API。
+            let source = result.translatedText == VLMTranslationEngine.failureMessage
                 ? "逐塊,翻譯失敗" : "逐塊(整頁沒對到)"
-
-            // ⚠️ 2026-09-03:Cyril 明確要求「本機模型翻不出來就用 Google 翻譯」
-            // ——這是對本專案「完全不接雲端服務」紅線開的一個範圍很窄的例外,
-            // 見 `GoogleTranslateFallback.swift` 檔頭說明。只在本機模型(含它
-            // 自己內部的寬裁圖重試)最終仍判定失敗時才觸發,只送文字(優先送
-            // VLM 讀到的 `recognizedText`,VLM 連讀都讀不出來才退而求其次送
-            // Vision OCR 的 `visionText`),絕對不送圖片。
-            if result.translatedText == VLMTranslationEngine.failureMessage {
-                let textToTranslate = result.recognizedText.isEmpty
-                    ? regions[i].visionText : result.recognizedText
-                if let googleTranslated = await GoogleTranslateFallback.translate(
-                    textToTranslate, from: sourceLanguage, to: targetLanguage) {
-                    finalTranslated = googleTranslated
-                    source = "逐塊,Google 翻譯備援"
-                }
-            }
-
             blockDebugs.append(BlockDebug(
                 visionText: regions[i].visionText,
                 recognizedText: result.recognizedText,
-                translatedText: finalTranslated,
+                translatedText: result.translatedText,
                 source: source))
             vlmEngine.finishPage()
-            guard finalTranslated != VLMTranslationEngine.failureMessage else { continue }
+            guard result.translatedText != VLMTranslationEngine.failureMessage else { continue }
             fractionalBlocks.append(
                 Self.fractionalPayload(
-                    pixelRect: regions[i].pixelRect, text: finalTranslated,
+                    pixelRect: regions[i].pixelRect, text: result.translatedText,
                     pixelWidth: pixelWidth, pixelHeight: pixelHeight))
         }
         vlmEngine.finishPage()

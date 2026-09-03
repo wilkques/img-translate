@@ -208,12 +208,6 @@ WKWebView 即時擷取網頁圖片(取代這次寫死的固定測試圖)、自�
 
 **第二輪(2026-09-02,程式碼已寫完,還沒裝機驗證)**:接上翻譯 pipeline(整頁 VLM 對位、沒對到退回逐塊,邏輯照抄 `ContentView.runVisionPagePipeline`,`Sources/OCR/*`/`Sources/Translation/*` 沒有改動)、疊字用 `window.imgTranslateApplyOverlay` 直接注入回網頁 DOM(百分比定位,跟 Vision 的 0-1 正規化座標系一致)、下載完成的圖排進序列化佇列一次只跑一個推理。已知限制:「閱讀」分頁跟「引擎測試」分頁各自養一份 VLM 引擎(可能重複佔記憶體)、DOM 包 wrapper 對 flex/grid 版面可能有副作用。詳見 `notes/2026-09-02.md`。
 
-## ⚠️ 對「100% 本機端」原則的一個窄範圍例外(2026-09-03)
+## 曾經試過對「100% 本機端」原則開例外,已撤回(2026-09-03)
 
-這個專案從一開始的紅線是**完全不接雲端服務、圖片不上傳第三方伺服器**(隱私+免費)。Cyril 明確要求「本機模型翻不出來就用 Google 翻譯」後,拍板了一個範圍很窄的例外,不是推翻整個原則:
-
-- **只送文字,不送圖片**——本機 VLM(含它自己內部的寬裁圖重試)最終仍判定翻譯失敗時才觸發
-- 送出去的是幾個字的辨識文字(優先送 VLM 讀到的文字,VLM 連讀都讀不出來才退而求其次送 Vision OCR 的文字),不是漫畫圖片本身
-- 用 Google 翻譯網頁版底層的免費公開端點(`translate_a/single`),不是申請 key 的官方付費 API
-
-實作見 `Sources/Translation/GoogleTranslateFallback.swift`(檔頭有完整說明)與 `TranslationRequestCoordinator.runTranslation` 的逐塊 fallback 迴圈,細節與裝機驗證重點見 `notes/2026-09-03.md`。
+Cyril 一度要求「本機模型翻不出來就用 Google 翻譯」,試過接一個範圍很窄的例外(只送文字不送圖片、用 Google 免費非官方端點)。裝機實測發現這個免費端點會被 Google 的濫用防護擋下來(`HTTP 429`,"automated queries"),試過加呼叫間隔節流也沒能繞過——裝置所在網路的 IP 應該已經被標記。Cyril 確認放棄這條備援,已把 `GoogleTranslateFallback.swift` 整個移除,**回到「100% 本機端」的原則,不要再加回來**,除非之後真的要換官方付費 API(需要 Cyril 自己申請 API key)。翻譯失敗就是失敗,交給既有的手動重試按鈕讓使用者自己決定要不要再試一次。細節見 `notes/2026-09-03.md`。
