@@ -86,6 +86,16 @@ struct MangaReaderView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 Spacer()
+                // 2026-09-03:Cyril 要求「開始翻譯」要明確觸發,不要一偵測到
+                // 圖片就自動下載+排隊翻譯——見 `TranslationRequestCoordinator.
+                // isAutoTranslateEnabled` 的說明。這顆按鈕只負責「邊捲邊翻」
+                // 那條路線,跟下面「翻譯整話」是兩個獨立的開始方式。
+                Button(coordinator.isAutoTranslateEnabled ? "翻譯中" : "開始翻譯") {
+                    coordinator.startAutoTranslate()
+                }
+                .font(.caption2)
+                .disabled(coordinator.isAutoTranslateEnabled || loadedURL == nil)
+
                 // 2026-09-03:Cyril 確認「追求品質」——邊捲邊翻永遠追不上
                 // VLM 速度,改成這顆按鈕觸發「整話全部翻完才給看」,見
                 // `TranslationRequestCoordinator.startPreTranslateAll` 的說明。

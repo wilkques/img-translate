@@ -58,6 +58,15 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
     /// 同一顆 build 上直接切換比較,不用等兩次 CI。
     @Published var useTextOnlyTranslation = false
 
+    /// 2026-09-03:Cyril 要求「開始翻譯」要明確觸發,不要一偵測到圖片就自動
+    /// 下載+排隊翻譯——原本 `handleDetectedImage` 偵測到就無條件開始跑,連
+    /// 使用者只是想瀏覽原文、還沒決定要不要翻譯的情況都會自動耗電/佔用推理
+    /// 額度。預設 `false`,`handleDetectedImage` 只登記進 `probes`(除錯清單
+    /// 看得到「偵測到」),要等 `startAutoTranslate()` 被呼叫過才會真的下載
+    /// +排隊。`startPreTranslateAll()`(翻譯整話)也會一併打開這個開關——
+    /// 那條路線本身就是主動按鈕觸發,沒理由讓它被這個新加的擋門檻卡住。
+    @Published private(set) var isAutoTranslateEnabled = false
+
     weak var webView: WKWebView?
     let vlmEngine: VLMTranslationEngine
 
@@ -96,7 +105,21 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
         probes.append(probe)
         indexByURL[url] = probes.count - 1
         elementIdByURL[url] = elementId
+        guard isAutoTranslateEnabled else { return }
         Task { await downloadAndEnqueue(url: url) }
+    }
+
+    /// 使用者按「開始翻譯」——之後偵測到的圖片才會自動下載+排隊翻譯。也會
+    /// 補跑「開關打開前就已經偵測到、但被這個開關擋下沒有下載」的圖片,
+    /// 不然使用者開頁面時滑過的那幾張圖永遠不會被翻到,只能手動一張張按
+    /// 重試,體驗很差。
+    func startAutoTranslate() {
+        guard !isAutoTranslateEnabled else { return }
+        isAutoTranslateEnabled = true
+        for probe in probes {
+            guard case .detected = probe.status else { continue }
+            Task { await downloadAndEnqueue(url: probe.url) }
+        }
     }
 
     /// 手動重試——Cyril 要求能直接點選重來,不用重新整個網頁重新捲一次,
@@ -128,6 +151,7 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
     /// 成立;之後如果換一個用虛擬捲動的站,這個模式要重新評估。
     func startPreTranslateAll() {
         guard !isPreTranslating else { return }
+        isAutoTranslateEnabled = true
         isPreTranslating = true
         preTranslateTotal = nil
         Task {
@@ -214,6 +238,7 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
         isPreTranslating = false
         preTranslateTotal = nil
         recentTextTranslations = []
+        isAutoTranslateEnabled = false
     }
 
     // MARK: - 序列化翻譯佇列
