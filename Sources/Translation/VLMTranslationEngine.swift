@@ -48,34 +48,26 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         /// `Qwen3-VL-4B` 同級,連續閱讀多張圖大機率一樣會撞記憶體上限——這是
         /// 品質比較用的選項,不是穩定性解法。
         case gemma3_4B = "Gemma 3 4B"
-        /// 2026-09-02:Liquid AI 的 `LFM2.5-VL-3B`(2026/08 釋出)。查證重點:
-        /// 28 項視覺評測平均 69.4,追平 `InternVL-3.5-4B`、只落後 `Qwen3.5-4B`
-        /// 0.7 分——用 3B 的體積打出接近 4B 的品質;支援 16 種語言,改版重點
-        /// 就是多語言視覺理解與指令遵循能力,正對應我們卡住的「叫它翻譯卻照抄
-        /// 原文」;官方 day-one 出 MLX 格式,不是社群自己轉的。
-        ///
-        /// ⚠️ **2026-09-02 血的教訓:不要把「推測的」repo id 放進選單。**
-        /// 原本這裡有一個 `LFM2.5-VL-3B (4bit)`,repo id 是照 8-bit 的命名慣例
-        /// 猜的。裝機選下去直接閃退,崩潰記錄是 `EXC_BREAKPOINT`/`SIGTRAP`
-        /// (`_assertionFailure`)——**Swift 執行期 trap 沒辦法用 `try/catch`
-        /// 接住,一觸發整個 process 就死**,不會像 `Gemma 4` 那樣好好顯示
-        /// 「載入失敗」。事後查證確認 LiquidAI 跟 mlx-community 都沒有
-        /// `LFM2.5-VL-3B` 的 4-bit 版,那個 id 根本是空的。以後只放查證過
-        /// 確實存在的 repo。
-        ///
-        /// 現在留兩個**都確認存在**的:
-        /// - `1.6B-8bit`(mlx-community 轉的,約 2GB)——體積落在安全範圍
-        ///   (跟現在用的 `Qwen2.5-VL-3B` 同級),是這個系列真正值得試的那顆
-        /// - `3B-8bit`(LiquidAI 官方轉的,約 3.3GB)——品質應該最好,但體積
-        ///   跟會 OOM 的 `Qwen3-VL-4B`(3.2GB)同級,大機率一樣撞記憶體上限
-        ///
-        /// ⚠️ 仍未解的風險:`LFM2.5` 是新一代骨幹,釘住的 `mlx-swift-lm`
-        /// 3.31.4 裡的 `LFM2VL.swift` 是針對上一代 `LFM2-VL` 寫的,能不能載入
-        /// 新版未知。先試 `1.6B-8bit`——它同時驗證兩件事:repo 存在的情況下
-        /// 會不會載入成功(如果還是崩,代表是架構不支援,這條路整個關掉)。
-        case lfm2_5VL1_6B_4bit = "LFM2.5-VL-1.6B (4bit)"
-        case lfm2_5VL1_6B_8bit = "LFM2.5-VL-1.6B (8bit)"
-        case lfm2_5VL3B_8bit = "LFM2.5-VL-3B (8bit)"
+        // ⚠️ 2026-09-03:整個 `LFM2.5-VL` 系列已移除,不要再加回來。
+        //
+        // 兩次裝機都是同一種閃退(`EXC_BREAKPOINT`/`SIGTRAP` →
+        // `_assertionFailure`,同一條呼叫鏈):
+        // 1. 09-02 `LFM2.5-VL-3B (4bit)` —— 事後查證那個 repo id 是我照命名
+        //    慣例猜的、根本不存在,當時以為崩潰是 404 造成的
+        // 2. 09-03 `LFM2.5-VL-3B (8bit)` —— **這顆 repo 確認存在**,而且新版
+        //    已經有 `verifyRepositoryExists` 會先擋 404,還是崩在同一個地方
+        //
+        // 第 2 次排除了「repo 不存在」這個解釋,結論收斂到:**釘住的
+        // `mlx-swift-lm` 3.31.4 裡的 `LFM2VL.swift` 是針對上一代 `LFM2-VL`
+        // 寫的,載不動 `LFM2.5` 這代骨幹**。跟 `Gemma 4` 是同一類上游還沒跟上
+        // 的問題,差別在 `Gemma 4` 丟出可捕捉的 error(畫面顯示載入失敗),
+        // `LFM2.5` 直接 trap ——接不住、整個 process 死。
+        //
+        // `LFM2.5-VL-1.6B`(4bit/8bit,repo 都確認存在)是同一代骨幹,幾乎
+        // 肯定一樣崩,不值得再花一次下載+閃退去驗證,一併移除。
+        //
+        // 之後要重新評估的前提:`mlx-swift-lm` 升級到有支援 `LFM2.5` 的版本
+        // (查 `LFM2VL.swift` 的更新紀錄),不是換 repo id 或量化版本能解決的。
 
         var id: String { rawValue }
 
@@ -95,18 +87,6 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
             case .gemma4E2B: return VLMRegistry.gemma4_E2B_it_4bit
             case .gemma4E4B: return VLMRegistry.gemma4_E4B_it_4bit
             case .gemma3_4B: return VLMRegistry.gemma3_4B_qat_4bit
-            // ⚠️ 沒有用 `VLMRegistry` preset:`LFM2.5-VL` 是 2026/08 才釋出的
-            // 新模型,釘住的 3.31.4 大機率還沒有對應的 preset 常數,直接用 repo
-            // id 指定比較保險(跟 `qwen3VL2B` 同一個寫法)。`extraEOSTokens` 刻意
-            // 留空:LFM2 系列用什麼結束標記沒查證過,亂猜一個錯的反而會讓生成
-            // 提早截斷。如果裝機發現每次都跑滿 maxTokens、輸出尾巴接一堆垃圾,
-            // 那就是缺結束標記,再回來補(`Qwen` 系列是 `<|im_end|>`)。
-            case .lfm2_5VL1_6B_4bit:
-                return ModelConfiguration(id: "mlx-community/LFM2.5-VL-1.6B-4bit")
-            case .lfm2_5VL1_6B_8bit:
-                return ModelConfiguration(id: "mlx-community/LFM2.5-VL-1.6B-8bit")
-            case .lfm2_5VL3B_8bit:
-                return ModelConfiguration(id: "LiquidAI/LFM2.5-VL-3B-MLX-8bit")
             }
         }
 
@@ -121,9 +101,6 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
             case .gemma4E2B: return 2_000_000_000    // 待確認,≈2B 有效參數
             case .gemma4E4B: return 3_500_000_000    // 待確認,≈4B 有效參數
             case .gemma3_4B: return 3_000_000_000    // 待確認,抄 qwen3VL4B 起手值
-            case .lfm2_5VL1_6B_4bit: return 1_100_000_000  // 待確認,8bit 版 safetensors 約 2.06GB 的一半
-            case .lfm2_5VL1_6B_8bit: return 2_100_000_000  // 同系列 8bit safetensors 實測約 2.06GB
-            case .lfm2_5VL3B_8bit: return 3_300_000_000  // 官方講「約 3.3GB 記憶體」
             }
         }
     }
