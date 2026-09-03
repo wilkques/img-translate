@@ -210,20 +210,36 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         // 正確讀出這些字,但我們裁太緊、只給孤立的一小塊字時會卡生成迴圈——所以
         // retry 改用範圍大很多的裁圖(涵蓋整個對話框/分鏡),搭配更大的縮放目標
         // 補償變大的範圍,而不是繼續在同一張緊裁圖上換 prompt/溫度。
+        //
+        // ⚠️ 2026-09-03:裝機實測發現「卡進重複迴圈」不是只有狀聲詞才會觸發,
+        // 一般但比較長/複雜的敘述句(例如「那兩人是有關係的」這種完整句子)
+        // 偶爾也會讓 3B 模型卡住——而且卡不卡住帶隨機性(`temperature: 0.2`
+        // 不是純貪婪解碼),同一句話重跑不一定卡在同個地方。原本只重試一次,
+        // 運氣不好一次就放棄。改成**最多重試 `maxWiderContextRetries` 次**,
+        // 中途只要有一次成功就停,把「要不要再試一次」這個決定從使用者手動
+        // 按重試按鈕,搬進程式自己做——次數選 2(共 3 次嘗試:1 次主要 +
+        // 2 次寬裁圖重試),再往上加會讓卡住到底的難句拖更久才顯示失敗,划不來。
         if firstAttempt.translatedText == Self.failureMessage {
-            let retryRaw = try await Self.generateOne(
-                image: widerContext ?? region,
-                prompt: Self.makeRetryPrompt(target: targetName),
-                container: container,
-                parameters: retryParameters,
-                resizeLongEdge: Self.retryVisionLongEdge)
-            var result = Self.parse(retryRaw)
-            result.usedWiderContextRetry = true
-            result.firstAttemptRawOutput = raw
-            // 重試也救不回來時,如果第一次至少讀到了原文,保留它——除錯清單上
-            // 「讀對但翻不出來」跟「連讀都讀不出來」是兩種完全不同的失敗,要分得出來。
-            if result.recognizedText.isEmpty { result.recognizedText = firstAttempt.recognizedText }
-            return result
+            let maxWiderContextRetries = 2
+            var lastResult = firstAttempt
+            for _ in 0..<maxWiderContextRetries {
+                let retryRaw = try await Self.generateOne(
+                    image: widerContext ?? region,
+                    prompt: Self.makeRetryPrompt(target: targetName),
+                    container: container,
+                    parameters: retryParameters,
+                    resizeLongEdge: Self.retryVisionLongEdge)
+                var result = Self.parse(retryRaw)
+                result.usedWiderContextRetry = true
+                result.firstAttemptRawOutput = raw
+                // 重試也救不回來時,如果第一次至少讀到了原文,保留它——除錯清單
+                // 上「讀對但翻不出來」跟「連讀都讀不出來」是兩種完全不同的失敗,
+                // 要分得出來。
+                if result.recognizedText.isEmpty { result.recognizedText = firstAttempt.recognizedText }
+                lastResult = result
+                if result.translatedText != Self.failureMessage { return result }
+            }
+            return lastResult
         }
 
         return firstAttempt
