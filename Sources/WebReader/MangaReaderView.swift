@@ -27,6 +27,12 @@ struct MangaReaderView: View {
     @State private var urlField = ""
     @State private var loadedURL: URL?
     @FocusState private var isURLFieldFocused: Bool
+    /// 除錯清單的高度,靠 `debugListResizeHandle` 拖曳調整——Cyril 要求圖片
+    /// 顯示區可以拉伸、底下的文字清單可以上下拉,兩者是同一件事的兩面:清單
+    /// 拉高,`MangaWebView`(`.frame(maxHeight: .infinity)`)自動讓出空間;
+    /// 清單拉低,圖片顯示區跟著變高。
+    @State private var debugListHeight: CGFloat = 200
+    @State private var debugListDragStartHeight: CGFloat?
 
     private let languageOptions: [(code: String, label: String)] = [
         ("es", "西班牙文"),
@@ -70,14 +76,14 @@ struct MangaReaderView: View {
             modelPicker
 
             Text(coordinator.pageStatus)
-                .font(.caption)
+                .font(.caption2)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-            vlmEngineStatusLine
-
             MangaWebView(urlToLoad: loadedURL, coordinator: coordinator)
                 .frame(maxHeight: .infinity)
+
+            debugListResizeHandle
 
             Text("偵測到的圖片(\(coordinator.probes.count))")
                 .font(.caption).bold()
@@ -103,23 +109,25 @@ struct MangaReaderView: View {
             }
         }
         .pickerStyle(.menu)
-        .font(.caption)
+        .font(.caption2)
     }
 
-    /// 模型選單+下載/移除按鈕,寫法照抄 `ContentView.enginePicker` 那段。
-    /// 記憶體吃緊(見上面 2026-09-02 說明)時,直接在這裡換小一點的模型
-    /// 不用重新編譯裝機。
+    /// 模型選單+下載/移除按鈕+模型狀態,全部擠在同一行、字級縮小——Cyril
+    /// 要求「翻譯中」狀態跟選擇模型排版在同一行、整體縮小,把空間讓給下面
+    /// 的網頁圖片顯示區。原本 `vlmEngineStatusLine` 是獨立一段、帶完整的
+    /// `ProgressView` 進度條,現在濃縮成一小段文字接在選單後面——只求「看得
+    /// 出目前卡在哪個階段」,不追求完整的進度條視覺效果。
     private var modelPicker: some View {
-        HStack {
+        HStack(spacing: 6) {
             let isDownloaded = vlmEngine.downloadedModels.contains(vlmEngine.selectedModel)
-            Button(isDownloaded ? "移除模型" : "下載模型") {
+            Button(isDownloaded ? "移除" : "下載") {
                 if isDownloaded {
                     vlmEngine.removeDownload(of: vlmEngine.selectedModel)
                 } else {
                     Task { try? await vlmEngine.ensureLoaded() }
                 }
             }
-            .font(.caption)
+            .font(.caption2)
             .foregroundStyle(isDownloaded ? .red : .accentColor)
 
             // 用自訂 Binding 呼叫 `changeModel(to:)`,不能直接綁 `$vlmEngine.selectedModel`
@@ -135,35 +143,60 @@ struct MangaReaderView: View {
                 }
             }
             .pickerStyle(.menu)
-            .font(.caption)
+            .font(.caption2)
+
+            Spacer(minLength: 4)
+
+            compactVLMStatusText
         }
         .onAppear { vlmEngine.refreshDownloadedModels() }
     }
 
+    /// `vlmEngineStatusLine` 濃縮版,塞進 `modelPicker` 那一行右側。
     @ViewBuilder
-    private var vlmEngineStatusLine: some View {
+    private var compactVLMStatusText: some View {
         switch vlmEngine.phase {
         case .idle:
             EmptyView()
         case .downloading(let fraction):
-            let gb = Double(vlmEngine.selectedModel.approximateDownloadBytes) / 1_000_000_000
-            ProgressView(value: fraction) {
-                Text("下載視覺模型中 \(Int(fraction * 100))%(約 \(String(format: "%.1f", gb))GB,首次執行請連 WiFi)")
-                    .font(.caption2)
-            }
+            Text("下載 \(Int(fraction * 100))%")
         case .loadingWeights:
-            ProgressView { Text("載入模型權重中…").font(.caption2) }
+            Text("載入中…")
         case .warmingUp:
-            ProgressView { Text("首次暖機中(編譯 Metal pipeline)…").font(.caption2) }
+            Text("暖機中…")
         case .translating(let done, let total):
-            ProgressView(value: Double(done), total: Double(max(total, 1))) {
-                Text("翻譯中 \(done)/\(total)").font(.caption2)
-            }
+            Text("翻譯 \(done)/\(total)")
         case .ready:
-            Text("視覺模型就緒").font(.caption2).foregroundStyle(.secondary)
-        case .failed(let message):
-            Text("視覺模型失敗:\(message)").font(.caption2).foregroundStyle(.red)
+            Text("就緒").foregroundStyle(.secondary)
+        case .failed:
+            Text("模型失敗").foregroundStyle(.red)
         }
+    }
+
+    /// 拖曳把手——上下拖動調整 `debugListHeight`,直接決定除錯清單佔多高、
+    /// 反過來就是網頁圖片顯示區(`.frame(maxHeight: .infinity)`)還剩多少
+    /// 空間。用 `debugListDragStartHeight` 記住拖曳「開始那一刻」的高度,
+    /// 每次 `onChanged` 都以這個固定基準加上本次拖曳的**累計位移**去算,
+    /// 不能直接拿目前的 `debugListHeight` 去疊加——`DragGesture.translation`
+    /// 本身就是「從拖曳開始算起的累計值」,兩個累計值疊加會越拖越誇張。
+    private var debugListResizeHandle: some View {
+        Capsule()
+            .fill(Color.secondary.opacity(0.5))
+            .frame(width: 40, height: 5)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 2)
+                    .onChanged { value in
+                        let base = debugListDragStartHeight ?? debugListHeight
+                        if debugListDragStartHeight == nil { debugListDragStartHeight = debugListHeight }
+                        // 手指往上拖(translation.height 是負的)代表要把清單
+                        // 拉高、往下拖代表要把清單壓低,所以是「基準 - 位移」。
+                        debugListHeight = min(max(base - value.translation.height, 80), 500)
+                    }
+                    .onEnded { _ in debugListDragStartHeight = nil }
+            )
     }
 
     private func loadURL() {
@@ -230,7 +263,7 @@ struct MangaReaderView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(height: 240)
+        .frame(height: debugListHeight)
     }
 
     private static func line(for probe: TranslationRequestCoordinator.ImageProbe) -> String {
