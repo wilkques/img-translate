@@ -247,9 +247,9 @@ struct MangaReaderView: View {
                         .font(.system(.caption2, design: .monospaced))
                         .textSelection(.enabled)
 
-                        // Cyril 要求:翻譯失敗的區塊要能直接點選重來,不用重新
-                        // 整頁重新捲一次。只在明確失敗的狀態顯示,翻譯中/下載
-                        // 中沒有必要、成功的也不需要。
+                        // Cyril 要求:能直接點選重來,不用重新整頁重新捲一次,
+                        // 而且不要只在失敗時才給——見 `isRetryable` 的說明,
+                        // 只排除正在下載/翻譯中的狀態。
                         if Self.isRetryable(probe.status) {
                             Button {
                                 coordinator.retryTranslation(for: probe.url)
@@ -286,11 +286,19 @@ struct MangaReaderView: View {
         }
     }
 
-    /// 只有明確失敗才給重試按鈕——`.noTextFound` 通常是這張圖真的沒有文字
-    /// (純畫面分鏡),重試大機率沒有意義,不提供避免誤導使用者以為哪裡壞了。
+    /// ⚠️ 2026-09-03:原本只有 `.failed` 才顯示重試按鈕,Cyril 要求不要隱藏——
+    /// 例如 `.noTextFound` 也可能是 OCR 偶發沒抓到、換個時機重跑會抓到,`.translated`
+    /// 也可能想換了目標語言後重新翻一次。改成**只排除正在進行中的兩個狀態**
+    /// (`.downloading`/`.translating`)——這兩個狀態下面 `TranslationRequestCoordinator`
+    /// 已經有一個非同步流程在跑,這時候點重試會對同一個網址再排一次
+    /// `downloadAndEnqueue`,兩份工作同時處理同一張圖,誰先寫回 `probes` 誰
+    /// 就贏,浪費一次推理還可能讓畫面狀態忽快忽慢地跳——這是唯一需要擋的
+    /// 情況,其餘狀態都放行。
     private static func isRetryable(_ status: TranslationRequestCoordinator.ImageProbe.Status) -> Bool {
-        if case .failed = status { return true }
-        return false
+        switch status {
+        case .downloading, .translating: return false
+        case .detected, .noTextFound, .translated, .failed: return true
+        }
     }
 
     private static func color(for status: TranslationRequestCoordinator.ImageProbe.Status) -> Color {

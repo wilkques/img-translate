@@ -73,13 +73,17 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
         Task { await downloadAndEnqueue(url: url) }
     }
 
-    /// 手動重試——`Cyril` 要求翻譯失敗的區塊能直接點選重來,不用重新整個
-    /// 網頁重新捲一次。重用既有的 `downloadAndEnqueue`(重新下載+排隊翻譯),
+    /// 手動重試——Cyril 要求能直接點選重來,不用重新整個網頁重新捲一次,
+    /// 而且不要只在失敗時才給(見 `MangaReaderView.isRetryable`,幾乎所有
+    /// 狀態都放行)。重用既有的 `downloadAndEnqueue`(重新下載+排隊翻譯),
     /// 因為 `updateStatus`/`updateBlocks` 都是用 `indexByURL[url]` 找既有的
     /// `ImageProbe` 原地更新,這裡不用另外處理「重複項目」的問題——
     /// `handleDetectedImage` 那個 `indexByURL[url] == nil` 的守門只擋「JS 又
-    /// 回報同一張圖」,不擋這個手動重試路徑,呼叫端(UI)自己保證只在
-    /// `.failed`/`.noTextFound` 狀態下才顯示這個按鈕。
+    /// 回報同一張圖」,不擋這個手動重試路徑。
+    ///
+    /// ⚠️ 沒有防呆擋「正在下載/翻譯中還按重試」——這個由呼叫端(UI)自己
+    /// 用 `isRetryable` 過濾掉,這裡沒有重複呼叫防護,如果之後有其他呼叫端
+    /// 不經過那層過濾直接呼叫這個函式,同一張圖可能被排進佇列處理兩次。
     func retryTranslation(for url: URL) {
         Task { await downloadAndEnqueue(url: url) }
     }
