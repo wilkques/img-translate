@@ -555,6 +555,21 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
             return ImageRegionTranslation(
                 recognizedText: original, translatedText: failureMessage, rawOutput: raw)
         }
+
+        // ⚠️ 2026-09-03 裝機實測抓到的新失敗模式:模型正確讀到一整句
+        // (`original` 有完整內容),`translated` 卻只吐出一兩個字(例如單一個
+        // 「譯」字)——一整句話不可能合理翻成一兩個字,但這種輸出通過得了上面
+        // `hasUsableContent`(畢竟真的有一個字)跟既有的「重複字元卡迴圈」判斷
+        // (根本沒有重複),兩層既有的退化偵測都抓不到,直接被當成正常翻譯顯示
+        // 出來。加一道「原文夠長、譯文短到不成比例」的判斷,抓到才算失敗觸發
+        // retry。門檻只挑最極端的情況(譯文 ≤ 2 字元且原文 ≥ 8 字元),刻意
+        // 保守——真正的短句翻譯(狀聲詞收斂後可能只有 2-3 字)不會被這條規則
+        // 誤傷,只有「原文很長、譯文短到不合理」這種明顯壞掉的比例才會觸發。
+        if translated.count <= 2 && original.count >= 8 {
+            return ImageRegionTranslation(
+                recognizedText: original, translatedText: failureMessage, rawOutput: raw)
+        }
+
         return ImageRegionTranslation(recognizedText: original, translatedText: translated, rawOutput: raw)
     }
 

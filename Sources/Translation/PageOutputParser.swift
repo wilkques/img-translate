@@ -37,7 +37,13 @@ enum PageOutputParser {
             if isDegenerateLine(translated) { translated = collapseRepeats(translated) }
             item.translated = translated
             item.original = collapseRepeats(item.original)
-            item.isDegenerate = !hasUsableContent(translated)
+            // ⚠️ 2026-09-03:跟 `VLMTranslationEngine.parse()` 同一個修法——
+            // 原文讀到一整句,譯文卻只吐出一兩個字(例如單一個「譯」字),這種
+            // 輸出通過得了 `hasUsableContent`(真的有文字)也沒有重複字元,
+            // 兩層既有的退化偵測都抓不到。門檻刻意保守(譯文 ≤2 字元且原文
+            // ≥8 字元),不誤傷正常的短句/狀聲詞翻譯。
+            let looksTruncated = translated.count <= 2 && item.original.count >= 8
+            item.isDegenerate = !hasUsableContent(translated) || looksTruncated
 
             item.order = items.count
             items.append(item)
