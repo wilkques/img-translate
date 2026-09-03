@@ -36,7 +36,9 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     enum VLMModelOption: String, CaseIterable, Identifiable {
         case qwen3VL4B = "Qwen3-VL-4B"
         case qwen2_5VL3B = "Qwen2.5-VL-3B"
-        case qwen3VL2B = "Qwen3-VL-2B"
+        // ⚠️ 2026-09-03:`Qwen3-VL-2B` 已從選單移除(Cyril 要求拿掉,選單
+        // 精簡)——沒有裝機驗證過壞掉,只是不再提供這個選項,不是像 Gemma 4/
+        // LFM2.5 那樣確認壞掉不能用。
         /// 2026-09-02:跟 `Gemma 4` 不是同一代架構——`Gemma 4` 掛在
         /// `mlx-swift-lm` 3.31.4 是因為它「共享 KV 注意力」這個新架構特徵的
         /// 載入程式碼還沒補上,`Gemma 3` 是上一代架構,沒有這個問題。查證
@@ -91,10 +93,6 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
             switch self {
             case .qwen3VL4B: return VLMRegistry.qwen3VL4BInstruct4Bit
             case .qwen2_5VL3B: return VLMRegistry.qwen2_5VL3BInstruct4Bit
-            case .qwen3VL2B:
-                return ModelConfiguration(
-                    id: "mlx-community/Qwen3-VL-2B-Instruct-4bit",
-                    extraEOSTokens: ["<|im_end|>"])
             case .gemma3_4B: return VLMRegistry.gemma3_4B_qat_4bit
             }
         }
@@ -106,7 +104,6 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
             switch self {
             case .qwen3VL4B: return 3_200_000_000    // safetensors 3.09GB + tokenizer/config
             case .qwen2_5VL3B: return 2_000_000_000  // 待確認
-            case .qwen3VL2B: return 1_780_000_000
             case .gemma3_4B: return 3_000_000_000    // 待確認,抄 qwen3VL4B 起手值
             }
         }
@@ -292,7 +289,7 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         for await event in stream {
             if let chunk = event.chunk { raw += chunk }
         }
-        return Self.parseTextOnly(raw.trimmingCharacters(in: .whitespacesAndNewlines))
+        return Self.parseTextOnly(raw.trimmingCharacters(in: .whitespacesAndNewlines), originalText: text)
     }
 
     /// 比 `generateParameters` 小很多——沒有圖片 token、沒有「先讀原文」這個
@@ -348,7 +345,8 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         Text: \(text)
 
         Reply with exactly one line, nothing else: the word TRANSLATION, a colon, a space, \
-        then only the \(target) text itself — no angle brackets, no quotes, no explanation. \
+        then only the \(target) text itself — no angle brackets, no quotes, no explanation, \
+        and do not repeat or label the original \(source) text before or after your answer. \
         For example, if the text was "HOLA" and the target language was Chinese, the correct \
         whole reply is:
         TRANSLATION: 你好
@@ -358,7 +356,7 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     /// 跟 `parse(_:)` 共用同一套退化偵測/收斂邏輯(`PageOutputParser`),但
     /// 只解析單一 `TRANSLATION:` 行——這條路線沒有 `ORIGINAL:`,原文本來就是
     /// 呼叫端傳進來的 Vision OCR 文字,不需要模型再讀一次。
-    private nonisolated static func parseTextOnly(_ raw: String) -> String {
+    private nonisolated static func parseTextOnly(_ raw: String, originalText: String) -> String {
         var translated = ""
         for line in raw.split(whereSeparator: \.isNewline) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -379,11 +377,39 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
             translated = String(translated.dropFirst().dropLast())
                 .trimmingCharacters(in: .whitespaces)
         }
+        // 防呆:裝機實測抓到模型把原文本身當標籤加在譯文前面,例如
+        // `VAMONOS.` 被翻成「VAMONOS: 我们走。」——懷疑是加了上下文範例
+        // (原文 => 譯文的格式)之後,模型模仿那個「兩段並列」的樣子帶進自己
+        // 的單行輸出裡。偵測「開頭幾乎等於原文,後面接著冒號/箭頭之類的
+        // 分隔符號」就把這段前綴去掉,只留真正的譯文。
+        if let stripped = Self.stripEchoedOriginalPrefix(from: translated, original: originalText) {
+            translated = stripped
+        }
         if PageOutputParser.isDegenerateLine(translated) {
             translated = PageOutputParser.collapseRepeats(translated)
         }
         guard PageOutputParser.hasUsableContent(translated) else { return failureMessage }
         return translated
+    }
+
+    private nonisolated static func stripEchoedOriginalPrefix(from translated: String, original: String) -> String? {
+        let trimmedOriginal = original.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedOriginal.isEmpty else { return nil }
+        let candidates = Set([
+            trimmedOriginal,
+            trimmedOriginal.trimmingCharacters(in: .punctuationCharacters)
+        ]).filter { !$0.isEmpty }
+        for candidate in candidates {
+            for separator in [":", "：", "=>", "->", "—", "-"] {
+                let prefix = candidate + separator
+                guard translated.count > prefix.count,
+                      translated.lowercased().hasPrefix(prefix.lowercased()) else { continue }
+                let rest = String(translated.dropFirst(prefix.count))
+                    .trimmingCharacters(in: .whitespaces)
+                if !rest.isEmpty { return rest }
+            }
+        }
+        return nil
     }
 
     /// 整頁一次讀完(見 `ImageTranslationEngine.translatePage` 的說明)。
