@@ -255,17 +255,36 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
             // 失敗」這種整張圖失敗的狀態,展開明細是空的,看不出模型當下到底
             // 吐了什麼、是不是又是照抄或卡迴圈。改成失敗也記一筆(`來源` 標
             // 「失敗」),只是不疊字、不算進 `fractionalBlocks`。
+            var finalTranslated = result.translatedText
+            var source = result.translatedText == VLMTranslationEngine.failureMessage
+                ? "逐塊,翻譯失敗" : "逐塊(整頁沒對到)"
+
+            // ⚠️ 2026-09-03:Cyril 明確要求「本機模型翻不出來就用 Google 翻譯」
+            // ——這是對本專案「完全不接雲端服務」紅線開的一個範圍很窄的例外,
+            // 見 `GoogleTranslateFallback.swift` 檔頭說明。只在本機模型(含它
+            // 自己內部的寬裁圖重試)最終仍判定失敗時才觸發,只送文字(優先送
+            // VLM 讀到的 `recognizedText`,VLM 連讀都讀不出來才退而求其次送
+            // Vision OCR 的 `visionText`),絕對不送圖片。
+            if result.translatedText == VLMTranslationEngine.failureMessage {
+                let textToTranslate = result.recognizedText.isEmpty
+                    ? regions[i].visionText : result.recognizedText
+                if let googleTranslated = await GoogleTranslateFallback.translate(
+                    textToTranslate, from: sourceLanguage, to: targetLanguage) {
+                    finalTranslated = googleTranslated
+                    source = "逐塊,Google 翻譯備援"
+                }
+            }
+
             blockDebugs.append(BlockDebug(
                 visionText: regions[i].visionText,
                 recognizedText: result.recognizedText,
-                translatedText: result.translatedText,
-                source: result.translatedText == VLMTranslationEngine.failureMessage
-                    ? "逐塊,翻譯失敗" : "逐塊(整頁沒對到)"))
+                translatedText: finalTranslated,
+                source: source))
             vlmEngine.finishPage()
-            guard result.translatedText != VLMTranslationEngine.failureMessage else { continue }
+            guard finalTranslated != VLMTranslationEngine.failureMessage else { continue }
             fractionalBlocks.append(
                 Self.fractionalPayload(
-                    pixelRect: regions[i].pixelRect, text: result.translatedText,
+                    pixelRect: regions[i].pixelRect, text: finalTranslated,
                     pixelWidth: pixelWidth, pixelHeight: pixelHeight))
         }
         vlmEngine.finishPage()

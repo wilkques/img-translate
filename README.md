@@ -207,3 +207,13 @@ WKWebView 即時擷取網頁圖片(取代這次寫死的固定測試圖)、自�
 **裝機驗證(2026-09-02)✅ 第一輪過關**:實測西班牙文漫畫網站,偵測到的 5 張圖全部下載成功(bytes+尺寸正常顯示),包含 lazy-load 換好的真實網址,沒有 403 或防盜鏈占位圖。兩個風險假設都成立。
 
 **第二輪(2026-09-02,程式碼已寫完,還沒裝機驗證)**:接上翻譯 pipeline(整頁 VLM 對位、沒對到退回逐塊,邏輯照抄 `ContentView.runVisionPagePipeline`,`Sources/OCR/*`/`Sources/Translation/*` 沒有改動)、疊字用 `window.imgTranslateApplyOverlay` 直接注入回網頁 DOM(百分比定位,跟 Vision 的 0-1 正規化座標系一致)、下載完成的圖排進序列化佇列一次只跑一個推理。已知限制:「閱讀」分頁跟「引擎測試」分頁各自養一份 VLM 引擎(可能重複佔記憶體)、DOM 包 wrapper 對 flex/grid 版面可能有副作用。詳見 `notes/2026-09-02.md`。
+
+## ⚠️ 對「100% 本機端」原則的一個窄範圍例外(2026-09-03)
+
+這個專案從一開始的紅線是**完全不接雲端服務、圖片不上傳第三方伺服器**(隱私+免費)。Cyril 明確要求「本機模型翻不出來就用 Google 翻譯」後,拍板了一個範圍很窄的例外,不是推翻整個原則:
+
+- **只送文字,不送圖片**——本機 VLM(含它自己內部的寬裁圖重試)最終仍判定翻譯失敗時才觸發
+- 送出去的是幾個字的辨識文字(優先送 VLM 讀到的文字,VLM 連讀都讀不出來才退而求其次送 Vision OCR 的文字),不是漫畫圖片本身
+- 用 Google 翻譯網頁版底層的免費公開端點(`translate_a/single`),不是申請 key 的官方付費 API
+
+實作見 `Sources/Translation/GoogleTranslateFallback.swift`(檔頭有完整說明)與 `TranslationRequestCoordinator.runTranslation` 的逐塊 fallback 迴圈,細節與裝機驗證重點見 `notes/2026-09-03.md`。
