@@ -357,9 +357,7 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         Do not correct it into a real word — it may be a scream or a sound effect rather \
         than a word.
         Step 2. Translate it into \(target). If it is a sound effect or a scream, \
-        transliterate the sound into \(target) instead of translating its literal meaning. \
-        If it is a person's name or other proper noun, transliterate it phonetically into \
-        \(target) too — never leave it unchanged in the original script.
+        transliterate the sound into \(target) instead of translating its literal meaning.
 
         Rules:
         - Never write the same letter or character more than 4 times in a row, in ANY \
@@ -397,12 +395,17 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     /// 下面 `makeRetryPrompt` 這個完全不同、更簡化的 retry-only prompt 處理,不動
     /// 這個已經驗證過對一般句子有效的主要 prompt。
     ///
-    /// ⚠️ 2026-09-03:Cyril 要求人名也要翻譯(音譯),不要保留原文——裝機實測
-    /// 抓到 `NA MUGYEOM`(疑似角色名)被模型直接照抄。加一句跟現有「狀聲詞要
-    /// 音譯」平行的指示(不是取代,是新增一種情況),風格照抄既有句子的寫法。
-    /// **這是對「引擎測試」分頁(4B,目前隱藏)跟閱讀分頁(3B)共用的主要
-    /// prompt 動手**,兩邊都要重新裝機驗證,尤其要確認沒有把已經調了七八輪
-    /// 才穩定的「UWA」難字/正常句子翻譯拖累退步。
+    /// ⚠️ 2026-09-03:試過加一句「人名也要音譯」(跟現有「狀聲詞要音譯」平行
+    /// 的新增指示,不是取代),**裝機實測是負分,已經 revert**——加了那句之後
+    /// 四個測試區塊全部退化回「整頁完全對不到、逐塊備援全部吐通用喊叫音譯
+    /// 哇哇哇」,連上一輪才剛翻對的 `ERES RUIDOSO` 都一起壞掉,退回到跟最早
+    /// 那個 bug 一模一樣的症狀。這再次驗證這份 prompt 對「總指令量」極度敏感
+    /// (跟 08-28/08-31 整頁 prompt 那次「拿掉數量提示才解決結構卡死」是同一個
+    /// 教訓)——**加任何一句話都要當成一次獨立實驗裝機驗證,不能跟其他改動
+    /// 一起送、也不能想當然爾「這句話跟現有邏輯無關就應該安全」**。「人名也要
+    /// 翻譯」這個需求本身沒有錯,只是不能用「加長主要 prompt」這個做法達成,
+    /// 需要另外想辦法(例如只在 retry 這種本來就簡化過的路徑加,或用後處理
+    /// 而非 prompt 指示)。
     private static func makePrompt(source: String, target: String) -> String {
         """
         This image is one small text region cropped from a comic page. The text is \
@@ -414,9 +417,7 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         scream or sound effect), do NOT try to count the exact number of repeats — just \
         write a short natural amount (2-4 repeats is enough) and move on to Step 2.
         Step 2. Translate it into \(target). If it is a sound effect or a scream, \
-        transliterate the sound into \(target) instead of translating its literal meaning. \
-        If it is a person's name or other proper noun, transliterate it phonetically into \
-        \(target) too — never leave it unchanged in the original script.
+        transliterate the sound into \(target) instead of translating its literal meaning.
 
         Reply with exactly two lines and nothing else, no explanation, no quotes:
         ORIGINAL: <the text you read>
@@ -450,8 +451,7 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         text or the scene itself). If it is a shout or sound effect, transliterate the \
         sound instead of translating its literal meaning, and keep any repeated sound \
         short (2-4 repeats is enough) — do not try to match the exact number of repeats \
-        in the image. If it is a person's name, transliterate it phonetically into \
-        \(target) too — never leave it unchanged in the original script.
+        in the image.
 
         Reply with exactly one line and nothing else, no explanation, no quotes:
         TRANSLATION: <the \(target) text>
