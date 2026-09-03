@@ -129,6 +129,29 @@ enum PageBridge {
       });
       domObserver.observe(document.documentElement, { childList: true, subtree: true });
 
+      // ⚠️ 2026-09-03:Cyril 拍板「品質優先」——與其邊捲邊翻(永遠追不上
+      // VLM 的處理速度,體驗很差),改成原生端呼叫這個函式,無視目前捲動
+      // 位置,把頁面上「現在就找得到」的候選圖片**全部**立刻回報,原生端
+      // 收到後在畫面上蓋一層進度遮罩,全部翻完才讓使用者開始捲動閱讀。
+      // 回傳值是這次回報的張數,原生端用來知道「翻完幾張才算全部完成」。
+      //
+      // 只處理「現在 DOM 裡已經存在」的圖——如果站方是虛擬捲動(圖片節點
+      // 要捲到夠近才會被插入 DOM),這個函式在使用者開始捲動前也看不到
+      // 那些還沒被插入的圖,那種情況下「整話一次翻完」這個模式本身就不
+      // 適用那種站,需要另外討論。
+      window.imgTranslateReportAll = function () {
+        scan(document);
+        var imgs = document.querySelectorAll('img');
+        var count = 0;
+        for (var i = 0; i < imgs.length; i++) {
+          if (isCandidate(imgs[i])) {
+            report(imgs[i]);
+            count++;
+          }
+        }
+        return count;
+      };
+
       // 原生端翻譯完成後呼叫這個函式回填。座標是相對圖片本身的百分比
       // (跟 Vision 的 0-1 正規化座標系一致),wrapper 的大小就等於 img 的
       // 渲染尺寸(inline-block 貼合內容),所以直接用百分比定位、不用原生端

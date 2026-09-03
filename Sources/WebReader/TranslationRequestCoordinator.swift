@@ -44,6 +44,14 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
     @Published var sourceLanguage = "es"
     @Published var targetLanguage = "zh-Hant-TW"
 
+    /// 「整話先翻完再看」模式的狀態——見 `startPreTranslateAll` 的說明。
+    /// `preTranslateTotal` 用 `Int?`(不是 0)區分「還不知道有幾張」跟
+    /// 「JS 回報總共 0 張候選圖片」,不然 `checkPreTranslateCompletion` 會在
+    /// JS 都還沒回應時,就因為「目前 0 張、目標 0 張、佇列是空的」而誤判
+    /// 成「已經全部翻完」,瞬間解除遮罩。
+    @Published private(set) var isPreTranslating = false
+    @Published private(set) var preTranslateTotal: Int?
+
     weak var webView: WKWebView?
     let vlmEngine: VLMTranslationEngine
 
@@ -88,6 +96,54 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
         Task { await downloadAndEnqueue(url: url) }
     }
 
+    /// 2026-09-03:Cyril 確認「追求翻譯品質」——邊捲邊翻(`IntersectionObserver`
+    /// 提前偵測)在這個 VLM pipeline 下永遠追不上正常捲動速度(單一序列推理,
+    /// 一張圖好幾個區塊,每區塊數秒起跳),體驗比等一次翻完更差。改成這個
+    /// 模式:無視目前捲動位置,叫 JS 把頁面上現有的候選圖片全部回報,原生端
+    /// 全部翻完之前用 `isPreTranslating` 讓畫面蓋一層進度遮罩擋住閱讀。
+    ///
+    /// 只找「JS 呼叫當下 DOM 裡已經存在」的圖——如果站方是虛擬捲動(圖片
+    /// 節點要捲到夠近才會被插入 DOM),這個模式在使用者開始捲動前根本看
+    /// 不到那些圖,`preTranslateTotal` 只會反映當下找得到的張數,不是整個
+    /// 章節「應該有」的張數。目前測試站(`olympusxyz.com`)已確認整話圖片
+    /// 是伺服器端一次全部算好、直接在初始 HTML 裡,不是虛擬捲動,這個假設
+    /// 成立;之後如果換一個用虛擬捲動的站,這個模式要重新評估。
+    func startPreTranslateAll() {
+        guard !isPreTranslating else { return }
+        isPreTranslating = true
+        preTranslateTotal = nil
+        Task {
+            let result = try? await webView?.evaluateJavaScript(
+                "window.imgTranslateReportAll && window.imgTranslateReportAll();"
+            )
+            preTranslateTotal = (result as? NSNumber)?.intValue ?? 0
+            checkPreTranslateCompletion()
+        }
+    }
+
+    /// 使用者不想等,先看已經翻好的部分——只是拿掉畫面上的進度遮罩,已經
+    /// 排進佇列的翻譯工作不會被取消,還是會在背景繼續跑完,之後捲到一樣
+    /// 會看到疊字(維持既有的「邊捲邊翻」行為當作後備)。
+    func skipPreTranslateWait() {
+        isPreTranslating = false
+    }
+
+    /// 每次任何一張圖的狀態改變都檢查一次——邏輯很單純(掃一次 `probes`),
+    /// 章節頂多幾十張圖,不需要另外做增量計數優化。
+    private func checkPreTranslateCompletion() {
+        guard isPreTranslating, let total = preTranslateTotal, probes.count >= total,
+              pendingJobs.isEmpty, !isProcessingQueue else { return }
+        guard probes.allSatisfy({ !Self.isSettling($0.status) }) else { return }
+        isPreTranslating = false
+    }
+
+    private static func isSettling(_ status: ImageProbe.Status) -> Bool {
+        switch status {
+        case .detected, .downloading, .translating: return true
+        case .translated, .noTextFound, .failed: return false
+        }
+    }
+
     private func downloadAndEnqueue(url: URL) async {
         updateStatus(for: url) { $0 = .downloading }
         do {
@@ -124,6 +180,7 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
     private func updateStatus(for url: URL, _ mutate: (inout ImageProbe.Status) -> Void) {
         guard let index = indexByURL[url], probes.indices.contains(index) else { return }
         mutate(&probes[index].status)
+        checkPreTranslateCompletion()
     }
 
     private func updateBlocks(for url: URL, _ blocks: [BlockDebug]) {
@@ -136,6 +193,8 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
         indexByURL = [:]
         elementIdByURL = [:]
         pendingJobs = []
+        isPreTranslating = false
+        preTranslateTotal = nil
     }
 
     // MARK: - 序列化翻譯佇列

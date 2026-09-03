@@ -75,13 +75,29 @@ struct MangaReaderView: View {
 
             modelPicker
 
-            Text(coordinator.pageStatus)
+            HStack {
+                Text(coordinator.pageStatus)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                // 2026-09-03:Cyril 確認「追求品質」——邊捲邊翻永遠追不上
+                // VLM 速度,改成這顆按鈕觸發「整話全部翻完才給看」,見
+                // `TranslationRequestCoordinator.startPreTranslateAll` 的說明。
+                Button(coordinator.isPreTranslating ? "翻譯整話中…" : "翻譯整話") {
+                    coordinator.startPreTranslateAll()
+                }
                 .font(.caption2)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .disabled(coordinator.isPreTranslating || loadedURL == nil)
+            }
 
-            MangaWebView(urlToLoad: loadedURL, coordinator: coordinator)
-                .frame(maxHeight: .infinity)
+            ZStack {
+                MangaWebView(urlToLoad: loadedURL, coordinator: coordinator)
+                    .frame(maxHeight: .infinity)
+                if coordinator.isPreTranslating {
+                    preTranslateOverlay
+                }
+            }
+            .frame(maxHeight: .infinity)
 
             debugListResizeHandle
 
@@ -197,6 +213,41 @@ struct MangaReaderView: View {
                     }
                     .onEnded { _ in debugListDragStartHeight = nil }
             )
+    }
+
+    /// 「整話先翻完再看」的進度遮罩——蓋住 `MangaWebView`,擋住閱讀直到全部
+    /// 翻完。`total` 用 `preTranslateTotal ?? probes.count` 是因為 JS 那次
+    /// `evaluateJavaScript` 呼叫還沒回應前 `preTranslateTotal` 是 `nil`,這時
+    /// 先顯示「掃描圖片中」而不是顯示 0/0(看起來像已經完成)。
+    private var preTranslateOverlay: some View {
+        let done = coordinator.probes.filter { Self.isSettled($0.status) }.count
+        let total = coordinator.preTranslateTotal
+        return VStack(spacing: 12) {
+            ProgressView()
+            if let total {
+                Text(total > 0 ? "翻譯整話中 \(done)/\(total)" : "這頁沒找到符合條件的圖片")
+                    .font(.callout)
+            } else {
+                Text("掃描圖片中…")
+                    .font(.callout)
+            }
+            Button("先看已翻好的部分") {
+                coordinator.skipPreTranslateWait()
+            }
+            .font(.caption)
+        }
+        .padding()
+        .background(.regularMaterial)
+        .cornerRadius(12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black.opacity(0.25))
+    }
+
+    private static func isSettled(_ status: TranslationRequestCoordinator.ImageProbe.Status) -> Bool {
+        switch status {
+        case .detected, .downloading, .translating: return false
+        case .translated, .noTextFound, .failed: return true
+        }
     }
 
     private func loadURL() {
