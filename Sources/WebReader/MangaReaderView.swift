@@ -187,30 +187,44 @@ struct MangaReaderView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 4) {
                 ForEach(coordinator.probes) { probe in
-                    if probe.blocks.isEmpty {
-                        Text(Self.line(for: probe))
-                            .font(.system(.caption2, design: .monospaced))
-                            .foregroundStyle(Self.color(for: probe.status))
-                            .textSelection(.enabled)
-                    } else {
-                        DisclosureGroup {
-                            VStack(alignment: .leading, spacing: 6) {
-                                ForEach(probe.blocks) { block in
-                                    VStack(alignment: .leading, spacing: 1) {
-                                        Text("Vision:\(block.visionText)")
-                                        Text("VLM讀到:\(block.recognizedText)")
-                                        Text("譯文:\(block.translatedText)")
-                                        Text("來源:\(block.source)").foregroundStyle(.secondary)
+                    HStack(alignment: .top, spacing: 6) {
+                        Group {
+                            if probe.blocks.isEmpty {
+                                Text(Self.line(for: probe))
+                                    .foregroundStyle(Self.color(for: probe.status))
+                            } else {
+                                DisclosureGroup {
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        ForEach(probe.blocks) { block in
+                                            VStack(alignment: .leading, spacing: 1) {
+                                                Text("Vision:\(block.visionText)")
+                                                Text("VLM讀到:\(block.recognizedText)")
+                                                Text("譯文:\(block.translatedText)")
+                                                Text("來源:\(block.source)").foregroundStyle(.secondary)
+                                            }
+                                        }
                                     }
+                                    .padding(.top, 2)
+                                } label: {
+                                    Text(Self.line(for: probe))
+                                        .foregroundStyle(Self.color(for: probe.status))
                                 }
                             }
-                            .padding(.top, 2)
-                        } label: {
-                            Text(Self.line(for: probe))
-                                .foregroundStyle(Self.color(for: probe.status))
                         }
                         .font(.system(.caption2, design: .monospaced))
                         .textSelection(.enabled)
+
+                        // Cyril 要求:翻譯失敗的區塊要能直接點選重來,不用重新
+                        // 整頁重新捲一次。只在明確失敗的狀態顯示,翻譯中/下載
+                        // 中沒有必要、成功的也不需要。
+                        if Self.isRetryable(probe.status) {
+                            Button {
+                                coordinator.retryTranslation(for: probe.url)
+                            } label: {
+                                Image(systemName: "arrow.clockwise.circle")
+                            }
+                            .font(.caption)
+                        }
                     }
                 }
             }
@@ -237,6 +251,13 @@ struct MangaReaderView: View {
         case .failed(let message):
             return "❌ \(shortURL) — \(message)"
         }
+    }
+
+    /// 只有明確失敗才給重試按鈕——`.noTextFound` 通常是這張圖真的沒有文字
+    /// (純畫面分鏡),重試大機率沒有意義,不提供避免誤導使用者以為哪裡壞了。
+    private static func isRetryable(_ status: TranslationRequestCoordinator.ImageProbe.Status) -> Bool {
+        if case .failed = status { return true }
+        return false
     }
 
     private static func color(for status: TranslationRequestCoordinator.ImageProbe.Status) -> Color {
