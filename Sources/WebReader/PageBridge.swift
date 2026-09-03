@@ -25,13 +25,34 @@ enum PageBridge {
       var watched = new WeakSet();
       var counter = 0;
 
+      // ⚠️ 2026-09-03:原本只看 `getBoundingClientRect()`(實際渲染尺寸)。
+      // 有些站的 lazy-load 圖片在真正換上 src 之前,版面是用小尺寸/未定型的
+      // 佔位元素撐著(不像有明確 CSS aspect-ratio 或 width/height 屬性保留版位
+      // 的做法),導致我們的 IntersectionObserver 提早(200% 螢幕高度)偵測到
+      // 時,`rect` 還是 0 或很小,`isCandidate` 判定失敗、不回報;等站方自己
+      // 換好 src、我們的 `MutationObserver` 才重新檢查一次時,通常已經逼近
+      // 站方自己(通常門檻比我們窄很多)判定「該載入了」的時間點,等於我們
+      // 提早偵測的設計被這個尺寸門檻抵銷掉了。改成優先看 HTML 上明確宣告的
+      // `width`/`height` 屬性(多數保留版位用的站會先寫這個,即使圖還沒載入),
+      // 量不到才退回實際渲染尺寸。
       function isCandidate(img) {
+        var declaredW = parseInt(img.getAttribute('width'), 10);
+        var declaredH = parseInt(img.getAttribute('height'), 10);
+        if (declaredW >= 200 && declaredH >= 200) { return true; }
         var rect = img.getBoundingClientRect();
         return rect.width >= 200 && rect.height >= 200;
       }
 
+      // 多蒐集幾個常見的 lazy-load 屬性名稱——不同站/不同 lazy-load 套件用的
+      // 屬性名不一樣,`data-src` 只是最常見的一種,漏掉其他命名就會在真正的
+      // `src` 換好前完全拿不到任何網址,只能乾等站方自己觸發換好。
       function currentSrc(img) {
-        return img.currentSrc || img.src || img.getAttribute('data-src') || '';
+        return img.currentSrc || img.src ||
+          img.getAttribute('data-src') ||
+          img.getAttribute('data-original') ||
+          img.getAttribute('data-lazy-src') ||
+          img.getAttribute('data-lazy') ||
+          '';
       }
 
       // 只在真的要回報時才包一層 wrapper——避免動到頁面上每一個 <img>
