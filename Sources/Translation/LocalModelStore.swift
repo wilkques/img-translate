@@ -147,13 +147,20 @@ enum LocalModelStore {
     /// 掃整個 repo 目錄(含 `blobs/` 底下下載中的暫存檔),只計 regular file
     /// ——`snapshots/` 裡是指向 `blobs/` 的 symlink,不算 regular file,所以
     /// 不會重複計算同一份資料。
+    ///
+    /// ⚠️ 2026-09-03 裝機實測發現:進度會卡在 0% 直到下載快完成才突然跳動。
+    /// 根因是原本傳了 `options: [.skipsHiddenFiles]`——下載中的暫存檔很可能
+    /// 用點開頭命名(常見的 `.incomplete`/隱藏暫存檔慣例),被這個選項整段
+    /// 跳過不算,等到暫存檔下載完成、被改名/搬進最終的非隱藏檔名時才會
+    /// 突然被算到。既然這個函式本來就是為了抓「下載中的暫存檔」才寫的(見
+    /// 上面的說明),跳過隱藏檔正好跟目的相反,改成不跳過。
     static func downloadedBytes(_ configuration: ModelConfiguration) -> Int64 {
         guard case .id(let repoId, revision: _) = configuration.id else { return 0 }
         let root = repoDirectory(for: repoId)
         guard let enumerator = FileManager.default.enumerator(
             at: root,
             includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
-            options: [.skipsHiddenFiles]
+            options: []
         ) else { return 0 }
 
         var total: Int64 = 0
