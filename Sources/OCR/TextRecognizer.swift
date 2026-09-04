@@ -8,6 +8,13 @@ struct RecognizedTextBlock {
     /// Vision 對這段辨識結果的信心值(0-1),VLM 混合式架構下只當除錯/排序參考用,
     /// 不影響本文字內容是否採用(文字內容一律交給 VLM 判斷)。
     let confidence: Float
+    /// 2026-09-04:Vision 第 2、3 名候選字串(不含第一名,第一名就是 `text`)。
+    /// 裝機實測發現這個字體的 U/L 形狀容易混淆(`SIGUIENDO` 被讀成
+    /// `SIGLIIENDO`),關掉語言校正沒解決這類視覺層級誤讀。Vision 本身在
+    /// 算候選字串時對曖昧筆畫會有不同猜測,把第一名以外的候選也留著,交給
+    /// 下游(純文字翻譯 prompt)當「這裡可能有其他讀法」的提示,讓語言模型
+    /// 自己判斷哪個讀法才是通順的句子——比我們自己刻一套拼字修正邏輯划算。
+    let alternates: [String]
 }
 
 enum TextRecognizer {
@@ -27,11 +34,14 @@ enum TextRecognizer {
                 }
                 let observations = (request.results as? [VNRecognizedTextObservation]) ?? []
                 let blocks = observations.compactMap { obs -> RecognizedTextBlock? in
-                    guard let candidate = obs.topCandidates(1).first else { return nil }
+                    let candidates = obs.topCandidates(3)
+                    guard let best = candidates.first else { return nil }
+                    let alternates = candidates.dropFirst().map { $0.string }
                     return RecognizedTextBlock(
-                        text: candidate.string,
+                        text: best.string,
                         normalizedBoundingBox: obs.boundingBox,
-                        confidence: candidate.confidence)
+                        confidence: best.confidence,
+                        alternates: alternates)
                 }
                 continuation.resume(returning: blocks)
             }

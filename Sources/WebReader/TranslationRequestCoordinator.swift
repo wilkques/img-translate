@@ -360,7 +360,7 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
             for region in regions {
                 guard let result = try? await vlmEngine.translateText(
                     region.visionText, from: sourceLanguage, to: targetLanguage,
-                    context: recentTextTranslations) else {
+                    context: recentTextTranslations, ocrAlternates: region.visionAlternates) else {
                     blockDebugs.append(BlockDebug(
                         visionText: region.visionText, recognizedText: region.visionText,
                         translatedText: VLMTranslationEngine.failureMessage, source: "純文字,失敗"))

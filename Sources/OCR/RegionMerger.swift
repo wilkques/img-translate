@@ -11,6 +11,10 @@ struct TextRegion: Identifiable {
     /// 不送去翻譯——實際送去 VLM 的是裁圖本身,不是這段文字。
     let visionTexts: [String]
     var visionText: String { visionTexts.joined(separator: " ") }
+    /// 2026-09-04:合併前每一行的第 2、3 名候選字串,攤平成一個陣列(不保留
+    /// 是哪一行的,純文字模式只是把這些當「其他可能讀法」的提示塞進 prompt,
+    /// 不需要精確對應到哪個字)。
+    let visionAlternates: [String]
 }
 
 enum RegionMerger {
@@ -28,6 +32,7 @@ enum RegionMerger {
 
         struct Item {
             var texts: [String]
+            var alternates: [String]
             var rect: CGRect   // 原始(未撐大)像素座標
         }
 
@@ -42,7 +47,7 @@ enum RegionMerger {
             let rect = CoordinateTransform.imagePixelRect(
                 forNormalizedVisionBox: block.normalizedBoundingBox,
                 imagePixelSize: CGSize(width: pixelWidth, height: pixelHeight))
-            return Item(texts: [block.text], rect: rect)
+            return Item(texts: [block.text], alternates: block.alternates, rect: rect)
         }
 
         // 重複掃描、合併任何一對撐大後會碰撞的框,直到沒有東西可合併為止。
@@ -57,7 +62,9 @@ enum RegionMerger {
                     let mergedTexts = a.rect.minY <= b.rect.minY
                         ? a.texts + b.texts
                         : b.texts + a.texts
-                    items[i] = Item(texts: mergedTexts, rect: a.rect.union(b.rect))
+                    items[i] = Item(
+                        texts: mergedTexts, alternates: a.alternates + b.alternates,
+                        rect: a.rect.union(b.rect))
                     items.remove(at: j)
                     didMerge = true
                     break outer
@@ -71,7 +78,7 @@ enum RegionMerger {
         // 疊字渲染與陣列索引無關,重排不影響畫面。
         return items
             .sorted { readingOrderPrecedes($0.rect, $1.rect) }
-            .map { TextRegion(pixelRect: $0.rect, visionTexts: $0.texts) }
+            .map { TextRegion(pixelRect: $0.rect, visionTexts: $0.texts, visionAlternates: $0.alternates) }
     }
 
     /// 閱讀順序:由上到下;垂直範圍重疊超過較矮那塊的一半時視為同一列,改由左到右。

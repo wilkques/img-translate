@@ -279,13 +279,15 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     /// 每次都是在沒有證據的情況下猜 prompt/生成參數要怎麼調。
     func translateText(
         _ text: String, from source: String, to target: String,
-        context: [(original: String, translated: String)] = []
+        context: [(original: String, translated: String)] = [],
+        ocrAlternates: [String] = []
     ) async throws -> (translated: String, rawOutput: String) {
         let sourceName = try LanguageNames.name(for: source)
         let targetName = try LanguageNames.name(for: target)
         let container = try await ensureLoaded()
         let prompt = Self.makeTextOnlyPrompt(
-            source: sourceName, target: targetName, text: text, context: context)
+            source: sourceName, target: targetName, text: text, context: context,
+            ocrAlternates: ocrAlternates)
 
         let userInput = UserInput(chat: [.user(prompt, images: [])])
         let lmInput = try await container.prepare(input: userInput)
@@ -324,9 +326,19 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     /// 「僅供參考、不是要翻譯的內容」——避免模型把上下文那幾行也當成這次要
     /// 翻譯的文字混進輸出裡。`context` 是空陣列時這段完全不出現,不影響原本
     /// 已經驗證過的行為。
+    /// ⚠️ 2026-09-04:新增兩個東西:
+    /// 1. `ocrAlternates`——裝機實測發現這個字體的 U/L 形狀容易讓 Vision 誤讀
+    ///    (`SIGUIENDO` 被讀成 `SIGLIIENDO`),純文字模式沒有圖片可以校正,
+    ///    誤讀會直接帶進錯誤翻譯。Vision 的第 2、3 名候選字串對曖昧筆畫常常
+    ///    有不同猜測,把這些candidates 也列出來、明講「可能是同一段文字的
+    ///    其他讀法,挑看起來語意通順的那個」,讓語言模型自己判斷,比我們自己
+    ///    刻拼字修正邏輯更划算。
+    /// 2. 加一句要求保留刪節號「...」——裝機實測發現模型會把 `HMM...` 的
+    ///    刪節號改寫成冒號(「唔唔：我不太確定」),語意上還說得通但風格跑掉。
     private static func makeTextOnlyPrompt(
         source: String, target: String, text: String,
-        context: [(original: String, translated: String)]
+        context: [(original: String, translated: String)],
+        ocrAlternates: [String]
     ) -> String {
         var contextBlock = ""
         if !context.isEmpty {
@@ -340,6 +352,16 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
 
             """
         }
+        var alternatesLine = ""
+        if !ocrAlternates.isEmpty {
+            let joined = ocrAlternates.joined(separator: " / ")
+            alternatesLine = """
+             The OCR that read this text is unreliable on this stylised font (letters like \
+            U/L are often confused) — here are alternate readings of the same text: \(joined). \
+            Use whichever reading forms a coherent \(source) sentence.
+            """
+        }
+
         return """
         \(contextBlock)Translate the following \(source) comic dialogue into \(target). You must always \
         give an actual \(target) translation — never leave the text unchanged or just copy \
@@ -347,9 +369,10 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         It may be an ordinary sentence, or it may be a shout or sound effect written with \
         repeated letters — if so, transliterate the sound into \(target) instead of \
         translating its literal meaning, and keep any repeated sound short (2-4 repeats is \
-        enough).
+        enough). If the original has an ellipsis "...", keep it as "..." in your translation \
+        instead of changing it to a colon or other punctuation.
 
-        Text: \(text)
+        Text: \(text)\(alternatesLine)
 
         Reply with exactly one line, nothing else: the word TRANSLATION, a colon, a space, \
         then only the \(target) text itself — no angle brackets, no quotes, no explanation, \
