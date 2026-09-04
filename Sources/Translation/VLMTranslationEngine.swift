@@ -271,10 +271,16 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     /// 最近幾筆「原文→譯文」當參考,幫模型維持一致性。純文字模式才加這個
     /// ——沒有圖片 token 的負擔,多幾行文字提示成本很低;`translateRegion`
     /// (讀圖路線)那兩份已經裝機驗證很多輪的 prompt 不動,风险太高不值得。
+    /// ⚠️ 2026-09-04:回傳型別從單一 `String` 改成帶 `rawOutput` 的 tuple——
+    /// 裝機實測發現 `Qwen3-VL-4B` 有時把標籤縮寫成「TRANSLA:」而不是完整的
+    /// 「TRANSLATION:」,導致解析失敗、把整段原始輸出(含標籤字面)直接當
+    /// 譯文顯示。這種「看起來是譯文字串,其實混進不該有的內容」的狀況不容易
+    /// 只靠解析後的結果診斷,呼叫端需要原始輸出才能在除錯清單裡對照,不然
+    /// 每次都是在沒有證據的情況下猜 prompt/生成參數要怎麼調。
     func translateText(
         _ text: String, from source: String, to target: String,
         context: [(original: String, translated: String)] = []
-    ) async throws -> String {
+    ) async throws -> (translated: String, rawOutput: String) {
         let sourceName = try LanguageNames.name(for: source)
         let targetName = try LanguageNames.name(for: target)
         let container = try await ensureLoaded()
@@ -289,7 +295,8 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         for await event in stream {
             if let chunk = event.chunk { raw += chunk }
         }
-        return Self.parseTextOnly(raw.trimmingCharacters(in: .whitespacesAndNewlines), originalText: text)
+        let trimmedRaw = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (Self.parseTextOnly(trimmedRaw, originalText: text), trimmedRaw)
     }
 
     /// 比 `generateParameters` 小很多——沒有圖片 token、沒有「先讀原文」這個
@@ -356,14 +363,22 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     /// 跟 `parse(_:)` 共用同一套退化偵測/收斂邏輯(`PageOutputParser`),但
     /// 只解析單一 `TRANSLATION:` 行——這條路線沒有 `ORIGINAL:`,原文本來就是
     /// 呼叫端傳進來的 Vision OCR 文字,不需要模型再讀一次。
+    ///
+    /// ⚠️ 2026-09-04:標籤比對原本要求精確比對完整單字「TRANSLATION:」,裝機
+    /// 實測 `Qwen3-VL-4B` 有時把它縮寫成「TRANSLA:」——完全比對不到,整段
+    /// 原始輸出(含「TRANSLA:」字面)就被當成譯文直接顯示出來。改成「找該行
+    /// 第一個冒號,冒號前的字只要以 TRANSLA 開頭就算數」,不要求完整單字,
+    /// 這樣「TRANSLATION:」「TRANSLA:」「TRANSLATE:」都認得出來。
     private nonisolated static func parseTextOnly(_ raw: String, originalText: String) -> String {
         var translated = ""
         for line in raw.split(whereSeparator: \.isNewline) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if let r = trimmed.range(of: "TRANSLATION:", options: [.caseInsensitive, .anchored]) {
-                translated = String(trimmed[r.upperBound...]).trimmingCharacters(in: .whitespaces)
-                break
-            }
+            guard let colonIndex = trimmed.firstIndex(where: { $0 == ":" || $0 == "：" }) else { continue }
+            let label = trimmed[..<colonIndex].trimmingCharacters(in: .whitespaces).uppercased()
+            guard label.hasPrefix("TRANSLA") else { continue }
+            translated = String(trimmed[trimmed.index(after: colonIndex)...])
+                .trimmingCharacters(in: .whitespaces)
+            break
         }
         if translated.isEmpty {
             translated = raw.replacingOccurrences(of: "```", with: "")

@@ -185,10 +185,20 @@ enum PageBridge {
           div.style.boxSizing = 'border-box';
           div.style.padding = '2%';
           div.style.pointerEvents = 'none';
-          // 字級用區塊實際渲染高度換算,不是靠 CSS 單位——wrapper 的
-          // clientHeight 就是 img 目前的螢幕渲染高度。
+          // ⚠️ 2026-09-04:原本字級只看框的高度,完全沒看框的寬度、也沒看
+          // 譯文實際字數。框的大小是照**原文**(來源語言)的 bounding box
+          // 撐出來的——如果翻譯後的中文字數比原文多、需要換行的行數比框高
+          // 能容納的行數多,超出的部分會被下面的 `overflow: hidden` 直接
+          // 裁掉(裝機實測抓到這個現象)。改成「框面積 ÷ 字數」估一個字級,
+          // 跟原本「框高 × 0.4」的上限取較小值——譯文字數越多,估出來的
+          // 字級越小,降低裁切風險。`2.2` 是「每個字大概要佔多少字級平方的
+          // 面積(含行距/字距開銷)」的起手估計值,沒有裝機驗證過精確度,
+          // 需要下一輪測試校正。
+          var boxWidthPx = wrapper.clientWidth * (block.width / 100);
           var boxHeightPx = wrapper.clientHeight * (block.height / 100);
-          var fontSize = Math.max(10, Math.min(boxHeightPx * 0.35, 28));
+          var charCount = Math.max(block.text.length, 1);
+          var areaBasedSize = Math.sqrt((boxWidthPx * boxHeightPx) / (charCount * 2.2));
+          var fontSize = Math.max(10, Math.min(areaBasedSize, boxHeightPx * 0.4, 28));
           div.style.fontSize = fontSize + 'px';
           div.textContent = block.text;
           wrapper.appendChild(div);

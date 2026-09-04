@@ -22,6 +22,12 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
         let recognizedText: String
         let translatedText: String
         let source: String
+        /// 2026-09-04:純文字模式(`useTextOnlyTranslation`)專用——模型的
+        /// 原始輸出,解析前的樣子。裝機實測抓到「解析結果看起來像譯文,其實
+        /// 混進了不該有的標籤字面」這種狀況(見 `VLMTranslationEngine.
+        /// parseTextOnly` 的說明),沒有原始輸出就無法診斷是解析邏輯的問題
+        /// 還是模型本身的問題。讀圖路線不用這個欄位,維持空字串。
+        var rawOutput: String = ""
     }
 
     struct ImageProbe: Identifiable {
@@ -352,7 +358,7 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
         // (見該檔案的說明)。這是為了乾淨對照兩條路線,不要混在一起跑。
         if useTextOnlyTranslation {
             for region in regions {
-                guard let translated = try? await vlmEngine.translateText(
+                guard let result = try? await vlmEngine.translateText(
                     region.visionText, from: sourceLanguage, to: targetLanguage,
                     context: recentTextTranslations) else {
                     blockDebugs.append(BlockDebug(
@@ -360,10 +366,12 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
                         translatedText: VLMTranslationEngine.failureMessage, source: "純文字,失敗"))
                     continue
                 }
+                let translated = result.translated
                 blockDebugs.append(BlockDebug(
                     visionText: region.visionText, recognizedText: region.visionText,
                     translatedText: translated,
-                    source: translated == VLMTranslationEngine.failureMessage ? "純文字,失敗" : "純文字"))
+                    source: translated == VLMTranslationEngine.failureMessage ? "純文字,失敗" : "純文字",
+                    rawOutput: result.rawOutput))
                 guard translated != VLMTranslationEngine.failureMessage else { continue }
                 // 只有真的翻成功才存進上下文——失敗訊息本身不是有效的譯文,
                 // 存進去只會誤導後面的呼叫。

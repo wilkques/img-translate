@@ -338,6 +338,14 @@ struct MangaReaderView: View {
                                                 Text("VLM讀到:\(block.recognizedText)")
                                                 Text("譯文:\(block.translatedText)")
                                                 Text("來源:\(block.source)").foregroundStyle(.secondary)
+                                                // 2026-09-04:純文字模式才會有值,讓解析前的原始輸出
+                                                // 看得到——裝機實測抓到「解析結果看起來像譯文,其實
+                                                // 混進不該有的標籤字面」這種狀況,沒有原始輸出沒辦法
+                                                // 判斷是解析邏輯的問題還是模型本身的問題。
+                                                if !block.rawOutput.isEmpty {
+                                                    Text("原始輸出:\(block.rawOutput)")
+                                                        .foregroundStyle(.orange)
+                                                }
                                             }
                                         }
                                     }
