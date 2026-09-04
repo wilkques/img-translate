@@ -83,9 +83,16 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
     private var indexByURL: [URL: Int] = [:]
     private var elementIdByURL: [URL: String] = [:]
 
-    /// VLM 同時只能處理一個推理(跟 `ContentView` 一樣的限制),原生端維護
-    /// 一個序列佇列,不能讓多張圖同時搶著呼叫模型。
-    private var pendingJobs: [(url: URL, image: UIImage)] = []
+    /// ⚠️ 2026-09-04:Cyril 要求翻譯要按照偵測順序、不要跳著跑。原本
+    /// `handleDetectedImage` 對每張偵測到的圖片各自起一個獨立的下載 `Task`,
+    /// 這些下載平行跑、誰先下載完誰就先被排進翻譯佇列——順序取決於網路
+    /// 下載快慢的競速結果,不是偵測順序,導致後面的圖有時候比前面的先翻好。
+    /// 改成單一佇列存**網址**(不是已下載好的圖片),下載本身也排進同一條
+    /// 序列裡:一次只處理一個網址,下載完才翻譯、翻譯完才輪到下一個——
+    /// 犧牲「邊翻上一張邊預先下載下一張」這個平行優化,換取順序保證絕對
+    /// 正確。下載通常只要幾百毫秒,相對於 VLM 推理動輒幾秒到幾十秒,這個
+    /// 犧牲的時間可以忽略。
+    private var pendingURLs: [URL] = []
     private var isProcessingQueue = false
 
     /// 2026-09-03:純文字模式(`useTextOnlyTranslation`)用的上下文記憶——
@@ -113,20 +120,23 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
         indexByURL[url] = probes.count - 1
         elementIdByURL[url] = elementId
         guard isAutoTranslateEnabled else { return }
-        Task { await downloadAndEnqueue(url: url) }
+        pendingURLs.append(url)
+        processQueueIfNeeded()
     }
 
     /// 使用者按「開始翻譯」——之後偵測到的圖片才會自動下載+排隊翻譯。也會
     /// 補跑「開關打開前就已經偵測到、但被這個開關擋下沒有下載」的圖片,
     /// 不然使用者開頁面時滑過的那幾張圖永遠不會被翻到,只能手動一張張按
-    /// 重試,體驗很差。
+    /// 重試,體驗很差。`probes` 本身就是偵測順序,依序附加到 `pendingURLs`
+    /// 就能保證這批補跑的圖片也照順序處理。
     func startAutoTranslate() {
         guard !isAutoTranslateEnabled else { return }
         isAutoTranslateEnabled = true
         for probe in probes {
             guard case .detected = probe.status else { continue }
-            Task { await downloadAndEnqueue(url: probe.url) }
+            pendingURLs.append(probe.url)
         }
+        processQueueIfNeeded()
     }
 
     /// 手動重試——Cyril 要求能直接點選重來,不用重新整個網頁重新捲一次,
@@ -141,7 +151,8 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
     /// 用 `isRetryable` 過濾掉,這裡沒有重複呼叫防護,如果之後有其他呼叫端
     /// 不經過那層過濾直接呼叫這個函式,同一張圖可能被排進佇列處理兩次。
     func retryTranslation(for url: URL) {
-        Task { await downloadAndEnqueue(url: url) }
+        pendingURLs.append(url)
+        processQueueIfNeeded()
     }
 
     /// 2026-09-03:Cyril 確認「追求翻譯品質」——邊捲邊翻(`IntersectionObserver`
@@ -181,7 +192,7 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
     /// 章節頂多幾十張圖,不需要另外做增量計數優化。
     private func checkPreTranslateCompletion() {
         guard isPreTranslating, let total = preTranslateTotal, probes.count >= total,
-              pendingJobs.isEmpty, !isProcessingQueue else { return }
+              pendingURLs.isEmpty, !isProcessingQueue else { return }
         guard probes.allSatisfy({ !Self.isSettling($0.status) }) else { return }
         isPreTranslating = false
     }
@@ -193,6 +204,10 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
         }
     }
 
+    /// 下載+翻譯是同一個序列佇列裡的**同一個工作單位**(見 `pendingURLs` 的
+    /// 說明)——下載完直接接著跑 `runTranslation`,不會把下載完的圖片另外
+    /// 丟進第二個佇列,那樣就又回到「下載跟翻譯各自平行,順序對不上」的
+    /// 老問題。
     private func downloadAndEnqueue(url: URL) async {
         updateStatus(for: url) { $0 = .downloading }
         do {
@@ -219,8 +234,7 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
                 }
                 return
             }
-            pendingJobs.append((url: url, image: image))
-            processQueueIfNeeded()
+            await runTranslation(url: url, image: image)
         } catch {
             updateStatus(for: url) { $0 = .failed(error.localizedDescription) }
         }
@@ -241,7 +255,7 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
         probes = []
         indexByURL = [:]
         elementIdByURL = [:]
-        pendingJobs = []
+        pendingURLs = []
         isPreTranslating = false
         preTranslateTotal = nil
         recentTextTranslations = []
@@ -252,11 +266,11 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
     // MARK: - 序列化翻譯佇列
 
     private func processQueueIfNeeded() {
-        guard !isProcessingQueue, !isPaused, !pendingJobs.isEmpty else { return }
+        guard !isProcessingQueue, !isPaused, !pendingURLs.isEmpty else { return }
         isProcessingQueue = true
-        let job = pendingJobs.removeFirst()
+        let url = pendingURLs.removeFirst()
         Task {
-            await runTranslation(url: job.url, image: job.image)
+            await downloadAndEnqueue(url: url)
             isProcessingQueue = false
             processQueueIfNeeded()
         }
