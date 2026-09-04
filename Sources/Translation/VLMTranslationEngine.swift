@@ -415,6 +415,23 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     /// 20 行的滑動視窗,會過期,不是永久詞庫)。如果這版「猜不準就保留原文」
     /// 還是不夠好,下一步應該考慮做一份持久化的人名詞庫(使用者手動釘一次
     /// 正確譯名、之後每次都直接套用),而不是繼續在單句 prompt 裡加規則。
+    /// (2026-09-04 後續:詞庫已經做出來了,見 `GlossaryStore`。)
+    ///
+    /// ⚠️ 2026-09-04(第五版,`GlossaryStore` 上線後裝機驗證抓到的新問題):
+    /// 韓漫模式下,原文本身就用羅馬拼音寫人名(`PARK HEEJUN`,西班牙文原文
+    /// 直接寫的,不是諺文)、句子其餘部分正常翻譯的情況下,模型把**整句話**
+    /// 都退化成英文回答,只有句首「如果」還是中文——原始輸出(`原始輸出:`
+    /// 那行)跟顯示的譯文完全一致,證實這是模型真的生成了這段內容,不是
+    /// 解析器的問題。判讀:第四版的「不確定就保留羅馬拼音」指示,只講了
+    /// 「名字本身」要怎麼處理,沒有明講「除了名字以外的部分還是要正常翻譯
+    /// 成 target」,模型被「這句有一個要保留原文的名字」這個訊號帶偏,連
+    /// 帶把整句的目標語言判斷都弄丟了——這跟過去好幾次「加的規則污染了
+    /// 不相干的行為」是同一個模式。
+    /// 修法:在同一句話裡明講「這條規則只適用於名字本身,句子其他部分依然
+    /// 要正常翻成 target,不准整句留在英文或其他語言」,並給一個完整範例
+    /// 示範「只有名字留羅馬拼音,其餘照常翻譯」的樣子("Kim Minsu"→
+    /// 「如果 Kim Minsu 想做,他就會做到」)。`ja` 分支比照同步修改。這輪
+    /// 還沒裝機驗證。
     private static func makeTextOnlyPrompt(
         source: String, target: String, text: String,
         context: [(original: String, translated: String)],
@@ -454,9 +471,16 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
             MUGYEOM"), it is almost certainly a Korean person's name, not an ordinary word \
             or a shout. If you know its conventional Chinese transliteration, use that. If \
             you are not confident of the correct transliteration, do not guess or invent \
-            characters — instead keep the name exactly as written in the original \
+            characters — instead keep just that name exactly as written in the original \
             Latin-alphabet romanization, unchanged, rather than producing an incorrect or \
-            garbled Hanzi guess. Do not translate the name's literal meaning.
+            garbled Hanzi guess. Do not translate the name's literal meaning. This only \
+            applies to the name itself — every other word in the sentence must still be \
+            translated into \(target) as normal, never left in English or any other \
+            language. For example, if the original (in some other language) says something \
+            like "If Kim Minsu wants to do it, he will do it", and you are not confident of \
+            the Chinese name for "Kim Minsu", the correct whole reply is: \
+            如果 Kim Minsu 想做,他就會做到 — only the name stays in Latin letters, everything \
+            around it is ordinary \(target).
             """
         case "ja":
             originHint = """
@@ -466,9 +490,16 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
             it is almost certainly a Japanese person's name, not an ordinary word or a \
             shout. If you know its conventional Chinese transliteration, use that. If you \
             are not confident of the correct transliteration, do not guess or invent \
-            characters — instead keep the name exactly as written in the original \
+            characters — instead keep just that name exactly as written in the original \
             Latin-alphabet romanization, unchanged, rather than producing an incorrect or \
-            garbled Hanzi guess. Do not translate the name's literal meaning.
+            garbled Hanzi guess. Do not translate the name's literal meaning. This only \
+            applies to the name itself — every other word in the sentence must still be \
+            translated into \(target) as normal, never left in English or any other \
+            language. For example, if the original (in some other language) says something \
+            like "If Taro Yamada wants to do it, he will do it", and you are not confident of \
+            the Chinese name for "Taro Yamada", the correct whole reply is: \
+            如果 Taro Yamada 想做,他就會做到 — only the name stays in Latin letters, everything \
+            around it is ordinary \(target).
             """
         default:
             break
