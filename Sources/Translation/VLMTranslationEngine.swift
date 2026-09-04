@@ -399,24 +399,27 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
 
         Text: \(text)\(alternatesLine)
 
-        Reply with exactly one line, nothing else: the word TRANSLATION, a colon, a space, \
-        then only the \(target) text itself — no angle brackets, no quotes, no explanation, \
-        and do not repeat or label the original \(source) text before or after your answer. \
-        For example, if the text was "HOLA" and the target language was Chinese, the correct \
-        whole reply is:
-        TRANSLATION: 你好
+        Reply with only the \(target) translation itself on a single line — no labels, no \
+        angle brackets, no quotes, no explanation, and do not repeat the original \(source) \
+        text before or after your answer. For example, if the text was "HOLA" and the target \
+        language was Chinese, the correct whole reply is:
+        你好
         """
     }
 
-    /// 跟 `parse(_:)` 共用同一套退化偵測/收斂邏輯(`PageOutputParser`),但
-    /// 只解析單一 `TRANSLATION:` 行——這條路線沒有 `ORIGINAL:`,原文本來就是
-    /// 呼叫端傳進來的 Vision OCR 文字,不需要模型再讀一次。
+    /// 跟 `parse(_:)` 共用同一套退化偵測/收斂邏輯(`PageOutputParser`)。
     ///
-    /// ⚠️ 2026-09-04:標籤比對原本要求精確比對完整單字「TRANSLATION:」,裝機
-    /// 實測 `Qwen3-VL-4B` 有時把它縮寫成「TRANSLA:」——完全比對不到,整段
-    /// 原始輸出(含「TRANSLA:」字面)就被當成譯文直接顯示出來。改成「找該行
-    /// 第一個冒號,冒號前的字只要以 TRANSLA 開頭就算數」,不要求完整單字,
-    /// 這樣「TRANSLATION:」「TRANSLA:」「TRANSLATE:」都認得出來。
+    /// ⚠️ 2026-09-04:六個裝機實測抓到的崩潰案例(「TRANSLAAAAAAAGH!!」
+    /// 「TRANSLYLYLYLY...」「TRANSLA! SLA! SLA!」「TRANSLGYSU」「TRANSLA 196」
+    /// 「TRANSLURP SLURP SLURP」)**全部以「TRANSL」開頭**,強烈指向:prompt
+    /// 要求模型先寫英文標籤「TRANSLATION:」這件事本身,就是模型在難字上
+    /// 脫軌的起跑點。`makeTextOnlyPrompt` 已經改成不再要求任何標籤,直接
+    /// 只回傳譯文本身——這代表下面「找 TRANSLA 開頭標籤行」這個迴圈現在
+    /// **預期大多數時候都找不到東西**,直接掉進 fallback 分支(把整段輸出
+    /// 當譯文)才是常態,不是邊緣案例。保留這個標籤比對迴圈只是為了不排除
+    /// 模型偶爾還是習慣性寫標籤的情況;`isBareLabelFragment` 這道防呆
+    /// (在 fallback 分支裡)依然保留,擋住模型即使拿掉指示還是寫出殘缺
+    /// 標籤片段的情況。
     private nonisolated static func parseTextOnly(_ raw: String, originalText: String) -> String {
         var translated = ""
         for line in raw.split(whereSeparator: \.isNewline) {

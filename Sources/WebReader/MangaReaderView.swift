@@ -355,6 +355,15 @@ struct MangaReaderView: View {
                                         ForEach(probe.blocks) { block in
                                             VStack(alignment: .leading, spacing: 1) {
                                                 Text("Vision:\(block.visionText)")
+                                                // 2026-09-04:純文字模式才會有值——VisionKit ImageAnalyzer
+                                                // (Safari 同款引擎)配對到的文字,跟上面「Vision:」並列
+                                                // 對照,才看得出這個修法對 U/L 誤讀這類問題有沒有實際
+                                                // 改善(對照案例:MUGYEOM 這裡如果讀對了,Vision 那行
+                                                // 可能還是顯示誤讀的 MLGYEOM)。
+                                                if !block.liveText.isEmpty {
+                                                    Text("LiveText:\(block.liveText)")
+                                                        .foregroundStyle(.green)
+                                                }
                                                 Text("VLM讀到:\(block.recognizedText)")
                                                 Text("譯文:\(block.translatedText)")
                                                 Text("來源:\(block.source)").foregroundStyle(.secondary)

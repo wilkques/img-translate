@@ -15,6 +15,14 @@ struct TextRegion: Identifiable {
     /// 是哪一行的,純文字模式只是把這些當「其他可能讀法」的提示塞進 prompt,
     /// 不需要精確對應到哪個字)。
     let visionAlternates: [String]
+    /// 2026-09-04:VisionKit `ImageAnalyzer`(Safari 同款引擎)讀到的文字,
+    /// 在 `RegionMerger.merge` 跑完之後才由呼叫端用相似度配對填入,預設
+    /// `nil`(配對不到或這個功能不可用時的正常狀態)。
+    var liveText: String?
+    /// 實際要送去翻譯的文字:優先用 `ImageAnalyzer` 的(品質較高),配對不到
+    /// 才退回 Vision 原始辨識結果。`visionText` 本身維持不變,除錯清單需要
+    /// 同時看到兩者才驗證得出這個修法有沒有生效。
+    var bestText: String { liveText ?? visionText }
 }
 
 enum RegionMerger {

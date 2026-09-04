@@ -34,6 +34,10 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
         /// 正確拼法,才能判斷「翻譯還是不準」是候選本身就沒有正確答案、還是
         /// 模型沒理會候選——不加這個只能瞎猜。讀圖路線不用這個欄位。
         var ocrAlternates: String = ""
+        /// 2026-09-04:純文字模式專用——VisionKit `ImageAnalyzer`(Safari
+        /// 同款引擎)配對到的文字,空字串代表配對不到或這個功能不可用。跟
+        /// `visionText` 並列顯示,才驗證得出這個修法有沒有實際生效。
+        var liveText: String = ""
     }
 
     struct ImageProbe: Identifiable {
@@ -362,12 +366,36 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
         // 足以跨過一般漫畫字體 20-50% 行高的行距。**刻意偏向「寧可多合併」**——
         // 合併過頭最多是一次看到兩個對話框(模型兩句都翻,疊字位置略偏但讀得懂),
         // 合併不足卻會產生完全無法翻譯的碎片,後者明顯更糟。
-        let regions = RegionMerger.merge(
+        var regions = RegionMerger.merge(
             recognized, pixelWidth: pixelWidth, pixelHeight: pixelHeight,
             heightInflate: 1.5)
         guard !regions.isEmpty else {
             updateStatus(for: url) { $0 = .noTextFound }
             return
+        }
+
+        // ⚠️ 2026-09-04:VisionKit `ImageAnalyzer`(Safari 同款引擎)讀文字內容,
+        // Vision 的 bounding box 繼續負責定位(`ImageAnalyzer` 不提供座標)。
+        // 只在純文字模式跑這一步——讀圖路線送的是裁圖本身,不需要文字內容。
+        // 用既有的 `PageOutputParser.fold`/`similarity`(當初為整頁 VLM 路線
+        // 寫的)把整頁讀到的每一行貪婪配對回 Vision 的區塊,配不到或這個
+        // 功能不可用(`LiveTextRecognizer` 回傳 `nil`)就維持 `liveText`
+        // 是 `nil`,`bestText` 自動退回 `visionText`,不影響既有行為。
+        if useTextOnlyTranslation, let liveLines = await LiveTextRecognizer.recognizeLines(in: page) {
+            var usedLiveLineIndices = Set<Int>()
+            for i in regions.indices {
+                let foldedVision = PageOutputParser.fold(regions[i].visionText)
+                var bestIndex: Int?
+                var bestScore = 0.0
+                for j in liveLines.indices where !usedLiveLineIndices.contains(j) {
+                    let score = PageOutputParser.similarity(foldedVision, PageOutputParser.fold(liveLines[j]))
+                    if score > bestScore { bestScore = score; bestIndex = j }
+                }
+                if let j = bestIndex, bestScore >= 0.5 {
+                    usedLiveLineIndices.insert(j)
+                    regions[i].liveText = liveLines[j]
+                }
+            }
         }
 
         var fractionalBlocks: [[String: Any]] = []
@@ -381,25 +409,29 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
         if useTextOnlyTranslation {
             for region in regions {
                 let alternatesText = region.visionAlternates.joined(separator: " / ")
+                // `bestText`:優先用 ImageAnalyzer 讀到的文字(品質較高),配對
+                // 不到才退回 Vision 原始辨識結果——見 `TextRegion.bestText` 的
+                // 說明。除錯清單的「Vision:」欄位維持顯示 `visionText`(不變),
+                // 新增的「LiveText:」欄位顯示 `liveText`,方便對照兩者差異。
                 guard let result = try? await vlmEngine.translateText(
-                    region.visionText, from: sourceLanguage, to: targetLanguage,
+                    region.bestText, from: sourceLanguage, to: targetLanguage,
                     context: recentTextTranslations, ocrAlternates: region.visionAlternates) else {
                     blockDebugs.append(BlockDebug(
-                        visionText: region.visionText, recognizedText: region.visionText,
+                        visionText: region.visionText, recognizedText: region.bestText,
                         translatedText: VLMTranslationEngine.failureMessage, source: "純文字,失敗",
-                        ocrAlternates: alternatesText))
+                        ocrAlternates: alternatesText, liveText: region.liveText ?? ""))
                     continue
                 }
                 let translated = result.translated
                 blockDebugs.append(BlockDebug(
-                    visionText: region.visionText, recognizedText: region.visionText,
+                    visionText: region.visionText, recognizedText: region.bestText,
                     translatedText: translated,
                     source: translated == VLMTranslationEngine.failureMessage ? "純文字,失敗" : "純文字",
-                    rawOutput: result.rawOutput, ocrAlternates: alternatesText))
+                    rawOutput: result.rawOutput, ocrAlternates: alternatesText, liveText: region.liveText ?? ""))
                 guard translated != VLMTranslationEngine.failureMessage else { continue }
                 // 只有真的翻成功才存進上下文——失敗訊息本身不是有效的譯文,
                 // 存進去只會誤導後面的呼叫。
-                recentTextTranslations.append((original: region.visionText, translated: translated))
+                recentTextTranslations.append((original: region.bestText, translated: translated))
                 if recentTextTranslations.count > Self.maxContextLines {
                     recentTextTranslations.removeFirst()
                 }

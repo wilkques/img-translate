@@ -60,6 +60,12 @@ targets:
     dependencies:
       - sdk: Vision.framework
       - sdk: WebKit.framework
+      # 2026-09-04:VisionKit 的 ImageAnalyzer(Safari「即時文字辨識」同款
+      # 引擎)——Vision 的 VNRecognizeTextRequest 對這個字體的 U/L 筆畫
+      # 辨識有極限(裝機反覆驗證過,查證後確認是引擎本身的差異,不是設定
+      # 沒調對),改用 ImageAnalyzer 讀文字內容,Vision 繼續負責定位座標
+      # (ImageAnalyzer 不提供文字座標)。見 Sources/OCR/LiveTextRecognizer.swift。
+      - sdk: VisionKit.framework
       # 刻意不連 MLXHuggingFace(官方 macro 路線會多拉 vendored xgrammar C++ +
       # swift-syntax macro plugin,編譯時間會爆掉)。改連 swift-huggingface +
       # swift-transformers,自己手寫轉接層(HuggingFaceBridge.swift)。
