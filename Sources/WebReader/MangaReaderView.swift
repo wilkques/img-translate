@@ -177,6 +177,19 @@ struct MangaReaderView: View {
             .font(.caption2)
             .foregroundStyle(isDownloaded ? .red : .accentColor)
 
+            // 2026-09-04:Cyril 要求模型可以先啟動(下載+載入+暖機),跟按
+            // 「開始翻譯」分開——原本只有「下載」按鈕會呼叫 `ensureLoaded()`,
+            // 但那顆按鈕一旦模型已經下載過就會變成「移除」,沒有其他入口能
+            // 主動把已下載的模型載入記憶體,只能等第一次真的翻譯時才觸發,
+            // 讓使用者按下「開始翻譯」的當下要多等一段載入+暖機時間。這顆
+            // 按鈕不管有沒有下載過都呼叫同一個 `ensureLoaded()`(沒下載會先
+            // 下載,下載過的直接載入),讓使用者可以提早把模型準備好。
+            Button("啟動模型") {
+                Task { try? await vlmEngine.ensureLoaded() }
+            }
+            .font(.caption2)
+            .disabled(Self.isModelBusyOrReady(vlmEngine.phase))
+
             // 用自訂 Binding 呼叫 `changeModel(to:)`,不能直接綁 `$vlmEngine.selectedModel`
             // ——直接綁會跳過「換模型前要先卸載舊模型」的保護,`ensureLoaded()`
             // 可能誤用還沒卸載的舊 container,這正是這輪在追的記憶體問題,不能
@@ -217,6 +230,15 @@ struct MangaReaderView: View {
             Text("就緒").foregroundStyle(.secondary)
         case .failed:
             Text("模型失敗").foregroundStyle(.red)
+        }
+    }
+
+    /// 「啟動模型」按鈕的可按條件——已經就緒或正在忙(下載/載入/暖機/
+    /// 翻譯中)就不用讓使用者再按一次,只有 `.idle`/`.failed` 才有意義。
+    private static func isModelBusyOrReady(_ phase: VLMTranslationEngine.Phase) -> Bool {
+        switch phase {
+        case .idle, .failed: return false
+        case .downloading, .loadingWeights, .warmingUp, .ready, .translating: return true
         }
     }
 
