@@ -1180,4 +1180,85 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         try? LocalModelStore.removeModel(option.configuration)
         refreshDownloadedModels()
     }
+
+    // MARK: - 詞庫「自動查找」候選抽取
+
+    /// 比照 `textOnlyGenerateParameters` 的風格——低溫度求穩定,`maxTokens`
+    /// 比單句翻譯大很多,因為一次要列出一整份候選清單。
+    private let glossaryExtractionGenerateParameters = GenerateParameters(
+        maxTokens: 512,
+        temperature: 0.2
+    )
+
+    /// 詞庫「自動查找」功能用——把 `GlossaryWikiSearch` 抓回來的 wiki 條目
+    /// 純文字丟給模型,抽取「原文名 -> 中文名」候選配對。這是**獨立於主要
+    /// 翻譯路徑之外的一次性呼叫**,不在使用者閱讀/翻譯的 pipeline 裡跑;
+    /// 抽取結果一律要經過使用者在 `GlossarySearchSheet` 勾選確認,才會存進
+    /// `GlossaryStore`,不會自動生效——失敗的代價很低(候選清單短一點或
+    /// 是空的),不影響任何正在進行的翻譯,所以值得用一個全新、獨立設計的
+    /// prompt,不需要比照即時翻譯路徑那種多輪裝機驗證的謹慎程度。
+    func extractGlossaryCandidates(
+        from articleText: String
+    ) async throws -> [(original: String, translated: String)] {
+        let container = try await ensureLoaded()
+        let prompt = Self.makeGlossaryExtractionPrompt(articleText: articleText)
+        let userInput = UserInput(chat: [.user(prompt, images: [])])
+        let lmInput = try await container.prepare(input: userInput)
+        let stream = try await container.generate(
+            input: lmInput, parameters: glossaryExtractionGenerateParameters)
+
+        var raw = ""
+        for await event in stream {
+            if let chunk = event.chunk { raw += chunk }
+        }
+        return Self.parseGlossaryCandidates(raw.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// 全新、獨立的 prompt——跟 `makePrompt`/`makeRetryPrompt`/
+    /// `makePagePrompt`/`makeTextOnlyPrompt` 完全分開,不共用也不修改任何
+    /// 一份既有 prompt(那幾份都已經裝機驗證很多輪,這裡不冒風險去動它們)。
+    private static func makeGlossaryExtractionPrompt(articleText: String) -> String {
+        """
+        The following is an excerpt from a Chinese-language wiki article about a \
+        comic, webtoon, or manga. It is reference material, not dialogue to \
+        translate. List every named character, place, or organisation that this \
+        article mentions together with both an original-language spelling (Latin \
+        letters, Hangul, Kana/Kanji, or similar) and a Chinese name. Only include \
+        a pair when you are confident the Chinese name is genuinely the \
+        translation of that specific original name. Skip anything you are not \
+        sure about, and do not invent names that are not actually in the text \
+        below.
+
+        Reply with one pair per line, in exactly this format, nothing else:
+        OriginalName -> 中文名
+
+        Article:
+        \(articleText)
+        """
+    }
+
+    /// 逐行解析「原文 -> 中文」配對,套用跟主要翻譯路徑一致的退化偵測
+    /// (`PageOutputParser.isDegenerateLine`/`isDegenerateWordRepeat`),避免
+    /// 把生成失控的垃圾輸出當成候選名字塞進清單。`results.count >= 50` 這個
+    /// 上限是防呆用的,避免生成失控吐出離譜長的清單塞爆審核畫面。
+    private static func parseGlossaryCandidates(
+        _ raw: String
+    ) -> [(original: String, translated: String)] {
+        var results: [(original: String, translated: String)] = []
+        for substring in raw.split(separator: "\n", omittingEmptySubsequences: true) {
+            let line = String(substring)
+            guard !PageOutputParser.isDegenerateLine(line), !isDegenerateWordRepeat(line) else { continue }
+            guard let separatorRange = line.range(of: "->") ?? line.range(of: "→") else { continue }
+            let original = line[line.startIndex..<separatorRange.lowerBound]
+                .trimmingCharacters(in: .whitespaces)
+            let translated = line[separatorRange.upperBound...]
+                .trimmingCharacters(in: .whitespaces)
+            guard !original.isEmpty, !translated.isEmpty,
+                  original.count < 80, translated.count < 80
+            else { continue }
+            results.append((original: original, translated: translated))
+            if results.count >= 50 { break }
+        }
+        return results
+    }
 }

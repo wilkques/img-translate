@@ -46,9 +46,21 @@ struct GlossaryPinSheet: View {
 
 /// 詞庫清單/刪除入口。錯誤訊息(檔案讀寫失敗)只在這裡出現——絕不阻擋或
 /// 打斷翻譯流程本身,見 `GlossaryStore.lastError` 的說明。
+///
+/// ⚠️ 2026-09-04:多接了 `sourceLanguageCode`/`vlmEngine`/`fetchPageTitle`
+/// 三個參數,只為了「自動查找」這顆按鈕——按下去先用 `fetchPageTitle()`
+/// 讀目前頁面標題當搜尋起手值,再用自己的 `.sheet(isPresented:)` 疊一層
+/// `GlossarySearchSheet`(sheet 疊 sheet,不是透過 `MangaReaderView` 那個
+/// 頂層 `ActiveSheet` 做狀態切換——同一個 item-driven sheet 在展示中途換
+/// case 容易有轉場的邊角問題,疊一層自己管理比較單純)。
 struct GlossaryListSheet: View {
     @ObservedObject var glossary: GlossaryStore
+    let sourceLanguageCode: String
+    let vlmEngine: VLMTranslationEngine
+    let fetchPageTitle: () async -> String
     @Environment(\.dismiss) private var dismiss
+    @State private var showSearchSheet = false
+    @State private var prefilledSeriesTitle = ""
 
     var body: some View {
         NavigationStack {
@@ -84,6 +96,171 @@ struct GlossaryListSheet: View {
                 ToolbarItem(placement: .primaryAction) {
                     EditButton()
                 }
+                ToolbarItem(placement: .primaryAction) {
+                    Button("自動查找") {
+                        Task {
+                            prefilledSeriesTitle = await fetchPageTitle()
+                            showSearchSheet = true
+                        }
+                    }
+                }
+            }
+        }
+        .sheet(isPresented: $showSearchSheet) {
+            GlossarySearchSheet(
+                seriesTitle: prefilledSeriesTitle, sourceLanguageCode: sourceLanguageCode,
+                glossary: glossary, vlmEngine: vlmEngine)
+        }
+    }
+}
+
+/// 詞庫「自動查找」畫面——抓漫畫名稱查維基百科,找到中文條目就丟給模型
+/// 抽取候選名單,使用者勾選確認才會真的存進詞庫(見 `GlossaryStore`)。
+///
+/// ⚠️ 2026-09-04:這是全新功能,命中率沒有保證——維基百科/中文維基收錄
+/// 的多半是有一定知名度、通常也有官方授權的作品,冷門或純靠盜版站流通
+/// 的作品很可能查不到。**查不到是預期中的正常結果**,畫面上要如實顯示
+/// 「找不到」,不能假裝成功或無聲卡住。抽出來的候選清單品質也沒有保證
+/// (wiki 條目品質不一、AI 抽取本身可能有錯)——這正是「一律要勾選確認
+/// 才寫進詞庫,絕不自動 upsert」這個設計存在的理由。
+struct GlossarySearchSheet: View {
+    @State var seriesTitle: String
+    let sourceLanguageCode: String
+    @ObservedObject var glossary: GlossaryStore
+    let vlmEngine: VLMTranslationEngine
+    @Environment(\.dismiss) private var dismiss
+
+    private struct Candidate: Identifiable {
+        let id = UUID()
+        let original: String
+        let translated: String
+        var isSelected = true
+    }
+
+    @State private var statusText = ""
+    @State private var errorText: String?
+    @State private var candidates: [Candidate] = []
+    @State private var isSearching = false
+    /// 找到條目時記下來源網址,提供一個「自己去核對」的連結——自動抽取
+    /// 的結果不該是黑盒子,使用者可以直接點過去看原始 wiki 條目。
+    @State private var foundArticleURL: URL?
+
+    private var selectedCount: Int {
+        candidates.filter { $0.isSelected }.count
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("作品名稱") {
+                    // 刻意可編輯,不能自動送出去搜尋——抓到的頁面標題常常
+                    // 混了站名/集數這類樣板文字(例如「Capítulo 104 de XXX
+                    // | Olympus Scanlation」),不同站的包裝格式差很多,沒
+                    // 辦法寫一套通用規則自動清乾淨,交給使用者自己修剪。
+                    TextField("漫畫名稱", text: $seriesTitle)
+                    Button(isSearching ? "搜尋中…" : "搜尋") {
+                        search()
+                    }
+                    .disabled(
+                        isSearching
+                            || seriesTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+
+                if !statusText.isEmpty {
+                    Section {
+                        Text(statusText).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+
+                if let errorText {
+                    Section {
+                        Text(errorText).font(.caption).foregroundStyle(.red)
+                    }
+                }
+
+                if let foundArticleURL {
+                    Section {
+                        Link("查看中文維基條目來源", destination: foundArticleURL)
+                            .font(.caption)
+                    }
+                }
+
+                if !candidates.isEmpty {
+                    Section("候選名單(勾選要加入詞庫的)") {
+                        ForEach($candidates) { $candidate in
+                            Toggle(isOn: $candidate.isSelected) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(candidate.original)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    Text(candidate.translated)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("自動查找")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("關閉") { dismiss() }
+                }
+                if !candidates.isEmpty {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("加入詞庫(已選\(selectedCount))") {
+                            for candidate in candidates where candidate.isSelected {
+                                glossary.upsert(
+                                    original: candidate.original, translated: candidate.translated)
+                            }
+                            dismiss()
+                        }
+                        .disabled(selectedCount == 0)
+                    }
+                }
+            }
+        }
+    }
+
+    private func search() {
+        errorText = nil
+        candidates = []
+        statusText = ""
+        foundArticleURL = nil
+        isSearching = true
+        Task { @MainActor in
+            do {
+                // `GlossaryWikiSearch.search` 是不帶 actor 隔離的自由函式,
+                // `onProgress` 被呼叫時實際跑在哪個執行緒不是這裡能保證的
+                // ——這個專案已經有太多次因為想當然爾的執行緒假設踩到裝機
+                // 才會現形的並行問題(Metal 競態、SIGABRT 等),這裡明講
+                // 跳回 MainActor 才碰 `@State`,不依賴隱含的 actor 繼承。
+                let result = try await GlossaryWikiSearch.search(
+                    seriesTitle: seriesTitle, sourceLanguageCode: sourceLanguageCode
+                ) { progress in
+                    Task { @MainActor in statusText = progress }
+                }
+                foundArticleURL = result.zhArticleURL
+                statusText = "AI 分析角色名單…"
+                let pairs = try await vlmEngine.extractGlossaryCandidates(from: result.zhArticleText)
+                isSearching = false
+                statusText = ""
+                if pairs.isEmpty {
+                    errorText = "找到條目「\(result.sourceTitle)」,但沒有抽出可用的人名候選"
+                } else {
+                    candidates = pairs.map { Candidate(original: $0.original, translated: $0.translated) }
+                }
+            } catch let error as GlossaryWikiSearchError {
+                isSearching = false
+                statusText = ""
+                switch error {
+                case .notFound(let stage):
+                    errorText = "\(stage),建議改用批次貼上手動輸入"
+                }
+            } catch {
+                isSearching = false
+                statusText = ""
+                errorText = "查詢失敗:\(error.localizedDescription)"
             }
         }
     }

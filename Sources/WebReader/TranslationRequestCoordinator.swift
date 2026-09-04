@@ -218,6 +218,16 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
         }
     }
 
+    /// 2026-09-04:詞庫「自動查找」功能用——讀頁面標題當漫畫名稱的搜尋
+    /// 起點,照抄 `startPreTranslateAll` 呼叫 JS 拿回傳值的寫法。刻意不
+    /// 在這裡清理字串(不剝站名/集數樣板文字)——不同站的標題包裝格式
+    /// 差很多,交給呼叫端把這個當可編輯欄位的起手值,使用者自己修剪。
+    func fetchPageTitle() async -> String {
+        let result = try? await webView?.evaluateJavaScript(
+            "window.imgTranslateGetPageTitle && window.imgTranslateGetPageTitle();")
+        return (result as? String) ?? ""
+    }
+
     /// 使用者不想等,先看已經翻好的部分——只是拿掉畫面上的進度遮罩,已經
     /// 排進佇列的翻譯工作不會被取消,還是會在背景繼續跑完,之後捲到一樣
     /// 會看到疊字(維持既有的「邊捲邊翻」行為當作後備)。
