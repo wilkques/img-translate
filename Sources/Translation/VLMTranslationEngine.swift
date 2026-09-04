@@ -375,6 +375,14 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     /// 已經 revert——那份 prompt 對總指令量極度敏感,`makePrompt`/
     /// `makeRetryPrompt`/`makePagePrompt` 這三份讀圖路線的 prompt 這次刻意
     /// 不動。
+    ///
+    /// ⚠️ 2026-09-04(第二版):第一版裝機實測抓到語言洩漏——`mangaOrigin ==
+    /// "ko"` 時,`NA MUGYEOM` 被 `Qwen3-VL-4B` 譯成「나」(韓文「我」,剛好
+    /// `NA` 這個羅馬拼音本身也是個真的韓文字),模型看到「這是韓漫」的提示後
+    /// 直接用韓文本身回答,不是音譯成 `target`。**這個參數的用途只是幫模型
+    /// 判斷「這大概是人名」,不是叫它用來源語系的文字回答**——第一版沒有明講
+    /// 「不管如何都只能用 `target` 回答,不准出現韓文/日文原生文字」,已修正
+    /// 加上這條硬性規定。
     private static func makeTextOnlyPrompt(
         source: String, target: String, text: String,
         context: [(original: String, translated: String)],
@@ -407,20 +415,24 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         switch mangaOrigin {
         case "ko":
             originHint = """
-             This is a Korean webtoon. If a word looks like an unrecognised proper name \
-            (for example written in Latin-alphabet romanization, like "NA MUGYEOM"), it is a \
-            Korean person's name, not an ordinary word or a shout — transliterate it \
-            phonetically into \(target) syllable-by-syllable using conventional Korean-name \
-            Hanzi choices, do not repeat or drop syllables, and do not translate its literal \
-            meaning.
+             This is a Korean webtoon, but you must still answer only in \(target) — never \
+            write your answer in Korean Hangul, even if a romanized word (like "NA") also \
+            happens to spell an ordinary Korean word. If a word looks like an unrecognised \
+            proper name (for example written in Latin-alphabet romanization, like "NA \
+            MUGYEOM"), treat it as a Korean person's name, not an ordinary word or a shout, \
+            and transliterate it phonetically into \(target) syllable-by-syllable using \
+            conventional Korean-name Hanzi choices — do not repeat or drop syllables, and do \
+            not translate its literal meaning.
             """
         case "ja":
             originHint = """
-             This is a Japanese manga. If a word looks like an unrecognised proper name (for \
-            example written in Latin-alphabet romanization), it is a Japanese person's name, \
-            not an ordinary word or a shout — transliterate it phonetically into \(target) \
-            syllable-by-syllable using conventional Japanese-name Hanzi/Kanji choices, do not \
-            repeat or drop syllables, and do not translate its literal meaning.
+             This is a Japanese manga, but you must still answer only in \(target) — never \
+            write your answer in Japanese Hiragana, Katakana or Kanji. If a word looks like \
+            an unrecognised proper name (for example written in Latin-alphabet romanization), \
+            treat it as a Japanese person's name, not an ordinary word or a shout, and \
+            transliterate it phonetically into \(target) syllable-by-syllable using \
+            conventional Japanese-name Hanzi/Kanji-reading choices — do not repeat or drop \
+            syllables, and do not translate its literal meaning.
             """
         default:
             break
