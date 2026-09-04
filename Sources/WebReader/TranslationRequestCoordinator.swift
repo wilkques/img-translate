@@ -56,7 +56,13 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
     /// 路線,改成 Vision OCR 文字直接丟 VLM 純文字翻譯(`VLMTranslationEngine.
     /// translateText`)。用來對照「文字路線」跟「讀圖路線」的速度/品質,方便
     /// 同一顆 build 上直接切換比較,不用等兩次 CI。
-    @Published var useTextOnlyTranslation = false
+    ///
+    /// 2026-09-04:Cyril 要求預設開啟——雖然這條路線這幾輪裝機測試反覆冒出
+    /// 新的品質問題(角括號、用解釋代替翻譯、照抄不翻、原文當標籤,見
+    /// notes/2026-09-03.md 的整體評估),但优先順序改成「先求快」,不是這條
+    /// 路線已經被判定夠穩定。讀圖路線(`useTextOnlyTranslation == false`)
+    /// 隨時可以手動切回去對照。
+    @Published var useTextOnlyTranslation = true
 
     /// 2026-09-03:Cyril 要求「開始翻譯」要明確觸發,不要一偵測到圖片就自動
     /// 下載+排隊翻譯——原本 `handleDetectedImage` 偵測到就無條件開始跑,連
