@@ -135,8 +135,17 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
     private var recentTextTranslations: [(original: String, translated: String)] = []
     private static let maxContextLines = 20
 
-    init(vlmEngine: VLMTranslationEngine) {
+    /// 人名詞庫——見 `GlossaryStore` 的說明。`glossary:` 刻意不給預設值:
+    /// 給了預設值會默默 new 出第二個 UI 觀察不到的 store,不如讓漏改的
+    /// 呼叫點直接編譯失敗(全 repo 只有一個呼叫點,見 `MangaReaderView`)。
+    /// 用普通 `let` 不用 `@ObservedObject`——這裡只在翻譯時讀 index,
+    /// 不需要因為 store 異動而重繪;兩者都是 `@MainActor`,在 sheet 釘的
+    /// 東西下一次查詢就看得到,不需要額外的觀察機制。
+    private let glossary: GlossaryStore
+
+    init(vlmEngine: VLMTranslationEngine, glossary: GlossaryStore) {
         self.vlmEngine = vlmEngine
+        self.glossary = glossary
     }
 
     // MARK: - 圖片偵測 → 下載
@@ -415,6 +424,33 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
         if useTextOnlyTranslation {
             for region in regions {
                 let alternatesText = region.visionAlternates.joined(separator: " / ")
+
+                // ⚠️ 2026-09-04:人名詞庫攔截,必須在呼叫模型**之前**做——
+                // 見 `GlossaryStore` 說明,詞庫要有強制力,不能只是丟進下面
+                // 的建議性 `context` 通道讓模型自己決定要不要理。命中就直接
+                // 用釘選值、完全不跑推理(順帶比較快),`rawOutput` 刻意留空
+                // (根本沒有模型輸出),除錯清單看到「來源:純文字,詞庫」加上
+                // 沒有「原始輸出」那行,就是這條路徑生效的證據。
+                if let pinned = glossary.lookup(region.bestText) {
+                    blockDebugs.append(BlockDebug(
+                        visionText: region.visionText, recognizedText: region.bestText,
+                        translatedText: pinned, source: "純文字,詞庫",
+                        ocrAlternates: alternatesText, liveText: region.liveText ?? ""))
+                    // 釘選的配對照樣存進上下文——它是真的原文→譯文配對,
+                    // 讓同一頁其他句子有機會透過既有的 `context` 通道保持
+                    // 人名一致(模型會在參考區看到「NA MUGYEOM => 羅茂謙」)。
+                    // 這是附加好處,不是保證;保證來自上面的攔截本身。
+                    recentTextTranslations.append((original: region.bestText, translated: pinned))
+                    if recentTextTranslations.count > Self.maxContextLines {
+                        recentTextTranslations.removeFirst()
+                    }
+                    fractionalBlocks.append(
+                        Self.fractionalPayload(
+                            pixelRect: region.pixelRect, text: pinned,
+                            pixelWidth: pixelWidth, pixelHeight: pixelHeight))
+                    continue
+                }
+
                 // `bestText`:優先用 ImageAnalyzer 讀到的文字(品質較高),配對
                 // 不到才退回 Vision 原始辨識結果——見 `TextRegion.bestText` 的
                 // 說明。除錯清單的「Vision:」欄位維持顯示 `visionText`(不變),

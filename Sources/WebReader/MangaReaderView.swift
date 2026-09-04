@@ -24,9 +24,27 @@ import SwiftUI
 struct MangaReaderView: View {
     @StateObject private var vlmEngine: VLMTranslationEngine
     @StateObject private var coordinator: TranslationRequestCoordinator
+    /// 人名詞庫——見 `GlossaryStore` 的說明。跟 `vlmEngine` 一樣,這個實例
+    /// 只屬於閱讀分頁,「引擎測試」分頁(目前隱藏)v1 不給詞庫。
+    @StateObject private var glossary: GlossaryStore
     @State private var urlField = ""
     @State private var loadedURL: URL?
     @FocusState private var isURLFieldFocused: Bool
+    /// 這個畫面的第一個 modal——用單一 item-driven sheet,不要在
+    /// `probeDebugList` 的 `ForEach` 裡掛 per-row sheet(那些 row 會被
+    /// LazyVStack 回收,per-row sheet 是「彈不出來/彈錯列」這類 bug 的
+    /// 經典來源)。
+    private enum ActiveSheet: Identifiable {
+        case pin(TranslationRequestCoordinator.BlockDebug)
+        case list
+        var id: String {
+            switch self {
+            case .pin(let block): return block.id.uuidString
+            case .list: return "list"
+            }
+        }
+    }
+    @State private var activeSheet: ActiveSheet?
     /// 除錯清單的高度,靠 `debugListResizeHandle` 拖曳調整——Cyril 要求圖片
     /// 顯示區可以拉伸、底下的文字清單可以上下拉,兩者是同一件事的兩面:清單
     /// 拉高,`MangaWebView`(`.frame(maxHeight: .infinity)`)自動讓出空間;
@@ -63,7 +81,10 @@ struct MangaReaderView: View {
         let engine = VLMTranslationEngine()
         engine.selectedModel = .qwen2_5VL3B
         _vlmEngine = StateObject(wrappedValue: engine)
-        _coordinator = StateObject(wrappedValue: TranslationRequestCoordinator(vlmEngine: engine))
+        let store = GlossaryStore()
+        _glossary = StateObject(wrappedValue: store)
+        _coordinator = StateObject(
+            wrappedValue: TranslationRequestCoordinator(vlmEngine: engine, glossary: store))
     }
 
     var body: some View {
@@ -141,13 +162,34 @@ struct MangaReaderView: View {
 
             debugListResizeHandle
 
-            Text("偵測到的圖片(\(coordinator.probes.count))")
-                .font(.caption).bold()
-                .frame(maxWidth: .infinity, alignment: .leading)
+            HStack {
+                Text("偵測到的圖片(\(coordinator.probes.count))")
+                    .font(.caption).bold()
+                Spacer()
+                // 2026-09-04:放在這裡而不是 `modelPicker`——那行右半邊
+                // 一直是空的,加在這裡不佔任何垂直空間(Cyril 要求垂直
+                // 空間讓給網頁顯示區);而且就在釘選發生的除錯清單正上方。
+                // `modelPicker` 已經五個控制項,誤觸容易按到「移除」
+                // (刪 2.2GB 模型)或「關閉模型」。標籤上的數字本身就是
+                // 「重開 App 後有沒有正確從磁碟載入」的截圖證據。
+                Button("詞庫(\(glossary.entries.count))") { activeSheet = .list }
+                    .font(.caption2)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             probeDebugList
         }
         .padding()
+        .sheet(item: $activeSheet) { sheet in
+            switch sheet {
+            case .pin(let block):
+                GlossaryPinSheet(
+                    original: block.recognizedText, translated: block.translatedText,
+                    glossary: glossary)
+            case .list:
+                GlossaryListSheet(glossary: glossary)
+            }
+        }
     }
 
     private var languagePickers: some View {
@@ -380,7 +422,23 @@ struct MangaReaderView: View {
                                                         .foregroundStyle(.green)
                                                 }
                                                 Text("VLM讀到:\(block.recognizedText)")
-                                                Text("譯文:\(block.translatedText)")
+                                                HStack(spacing: 4) {
+                                                    Text("譯文:\(block.translatedText)")
+                                                    // 2026-09-04:釘進人名詞庫的入口。按鈕放在
+                                                    // DisclosureGroup 的內容裡(不是 label),不會
+                                                    // 跟展開/收合手勢打架。釘的是 `recognizedText`
+                                                    // (= `region.bestText`)——跟 `GlossaryStore.
+                                                    // lookup` 查的是同一個欄位;釘 `visionText`
+                                                    // 會產生永遠比對不到的死條目(當 LiveText
+                                                    // 贏過 bestText 的時候)。
+                                                    Button {
+                                                        activeSheet = .pin(block)
+                                                    } label: {
+                                                        Image(systemName: "pin")
+                                                    }
+                                                    .buttonStyle(.borderless)
+                                                    .font(.caption2)
+                                                }
                                                 Text("來源:\(block.source)").foregroundStyle(.secondary)
                                                 // 2026-09-04:純文字模式才會有值,讓解析前的原始輸出
                                                 // 看得到——裝機實測抓到「解析結果看起來像譯文,其實
