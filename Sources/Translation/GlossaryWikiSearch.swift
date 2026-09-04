@@ -47,6 +47,19 @@ enum GlossaryWikiSearch {
         let query: QueryResult
     }
 
+    private struct CategoriesResponse: Decodable {
+        struct Page: Decodable {
+            struct Category: Decodable {
+                let title: String
+            }
+            let categories: [Category]?
+        }
+        struct QueryResult: Decodable {
+            let pages: [String: Page]
+        }
+        let query: QueryResult
+    }
+
     private struct LangLinksResponse: Decodable {
         struct Page: Decodable {
             struct LangLink: Decodable {
@@ -127,6 +140,22 @@ enum GlossaryWikiSearch {
 
     /// 回傳 `nil` 代表「這個語言版本查不到,可以換下一個語言再試」——不是
     /// 錯誤,是預期中會發生的正常情況,呼叫端據此決定要不要 fallback。
+    ///
+    /// ⚠️ 2026-09-04:裝機實測抓到誤判——搜尋「El matón a cargo」,維基百科
+    /// 的 `list=search` 回傳的第一筆是「Marco Pomponio Matón」(古羅馬政治
+    /// 家),純粹是關鍵字「Matón」剛好重疊,跟這部漫畫毫無關係。原本的寫法
+    /// 無條件信任第一筆結果,沒有檢查回傳結果跟查詢字串到底像不像——維基
+    /// 百科的全文搜尋是相關性排序,不是「有沒有這個條目」的精確比對,排第
+    /// 一不代表真的是同一個作品。加兩層過濾,兩層都用真實請求驗證過對這個
+    /// 假陽性案例確實有效:
+    /// 1. `isPlausibleTitleMatch`——查詢字串裡「有意義的字」要全部出現在
+    ///    候選標題裡(這個案例候選標題沒有「cargo」,直接被排除)
+    /// 2. **分類檢查**——用 `prop=categories` 確認候選條目的分類裡有沒有
+    ///    manga/manhwa/webtoon/comic 這類字眼(這個案例的分類全是古羅馬
+    ///    歷史相關,`Categoría:Cónsules de la República romana` 之類,
+    ///    完全沒有漫畫相關分類,同樣會被排除)。兩層都通過才接受,都不符合
+    ///    就當作這個語言版本查不到——寧可少抓、不要抓錯(跟詞庫比對「寧可
+    ///    漏抓不要錯抓」是同一個原則)。
     private static func searchWikipedia(
         language: String, title: String, session: URLSession
     ) async throws -> (pageID: Int, language: String, title: String)? {
@@ -135,7 +164,7 @@ enum GlossaryWikiSearch {
             URLQueryItem(name: "action", value: "query"),
             URLQueryItem(name: "list", value: "search"),
             URLQueryItem(name: "srsearch", value: title),
-            URLQueryItem(name: "srlimit", value: "1"),
+            URLQueryItem(name: "srlimit", value: "5"),
             URLQueryItem(name: "format", value: "json")
         ]
         guard let url = components.url else { return nil }
@@ -148,10 +177,85 @@ enum GlossaryWikiSearch {
         } catch {
             return nil
         }
-        guard let decoded = try? JSONDecoder().decode(SearchResponse.self, from: data),
-              let first = decoded.query.search.first
-        else { return nil }
-        return (first.pageid, language, first.title)
+        guard let decoded = try? JSONDecoder().decode(SearchResponse.self, from: data) else { return nil }
+
+        let plausible = decoded.query.search.filter { isPlausibleTitleMatch(query: title, candidate: $0.title) }
+        guard !plausible.isEmpty else { return nil }
+
+        let comicPageIDs = await comicRelatedPageIDs(
+            among: plausible.map(\.pageid), language: language, session: session)
+        guard let match = plausible.first(where: { comicPageIDs.contains($0.pageid) }) else { return nil }
+        return (match.pageid, language, match.title)
+    }
+
+    /// 判斷候選條目標題跟查詢字串是不是「同一個東西」——要求查詢字串裡
+    /// 「有意義的字」(去掉常見的冠詞/介詞、長度太短的字)全部都要出現在
+    /// 候選標題的字集合裡。用「全部要有」而不是設一個模糊的相似度門檻
+    /// (例如 Dice 係數),是因為算過「El matón a cargo」跟「Marco Pomponio
+    /// Matón」這組錯誤配對,字元層級的相似度其實有 0.3 左右,跟真正配對
+    /// 成功案例的門檻太接近,容易誤判;字詞層級「全部要有」對這個案例能
+    /// 正確排除(候選標題沒有「cargo」這個字),對真正相關的條目(標題
+    /// 用詞通常包含查詢的核心字)還是能通過。
+    private static func isPlausibleTitleMatch(query: String, candidate: String) -> Bool {
+        let queryWords = significantWords(in: query)
+        guard !queryWords.isEmpty else { return false }
+        let candidateWords = significantWords(in: candidate)
+        return queryWords.isSubset(of: candidateWords)
+    }
+
+    private static let comicCategoryKeywords = [
+        "manga", "manhwa", "manhua", "webtoon", "comic", "historieta"
+    ]
+
+    /// 一次查詢一批候選 pageid 的分類(用 `|` 合併,避免逐筆各打一次 API),
+    /// 回傳分類裡有出現漫畫相關字眼的那些 pageid。用真實請求驗證過:
+    /// 「Solo Leveling」的分類裡有「2010s manhwa」「Action webtoons」這類
+    /// 字眼會通過;「Marco Pomponio Matón」的分類全是古羅馬歷史相關,不會
+    /// 通過。查詢失敗(逾時、格式跑掉)一律回傳空集合,不阻擋、不當機。
+    private static func comicRelatedPageIDs(
+        among pageIDs: [Int], language: String, session: URLSession
+    ) async -> Set<Int> {
+        guard !pageIDs.isEmpty else { return [] }
+        var components = URLComponents(string: "https://\(language).wikipedia.org/w/api.php")!
+        components.queryItems = [
+            URLQueryItem(name: "action", value: "query"),
+            URLQueryItem(name: "prop", value: "categories"),
+            URLQueryItem(name: "pageids", value: pageIDs.map(String.init).joined(separator: "|")),
+            URLQueryItem(name: "cllimit", value: "50"),
+            URLQueryItem(name: "format", value: "json")
+        ]
+        guard let url = components.url else { return [] }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 10
+
+        guard let (data, _) = try? await session.data(for: request),
+              let decoded = try? JSONDecoder().decode(CategoriesResponse.self, from: data)
+        else { return [] }
+
+        var matched: Set<Int> = []
+        for (key, page) in decoded.query.pages {
+            guard let pageID = Int(key) else { continue }
+            let categoryTitles = (page.categories ?? []).map { $0.title.lowercased() }
+            let isComic = categoryTitles.contains { title in
+                comicCategoryKeywords.contains { title.contains($0) }
+            }
+            if isComic { matched.insert(pageID) }
+        }
+        return matched
+    }
+
+    private static let titleStopwords: Set<String> = [
+        "el", "la", "los", "las", "de", "del", "a", "un", "una", "unos", "unas",
+        "the", "of", "and", "in", "on", "at", "to", "for", "por", "en", "y"
+    ]
+
+    private static func significantWords(in text: String) -> Set<String> {
+        let folded = text.folding(
+            options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+        return Set(
+            folded.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+                .map { $0.lowercased() }
+                .filter { $0.count >= 3 && !titleStopwords.contains($0) })
     }
 
     /// 回傳 `nil` 代表這個條目沒有中文版——同樣不是錯誤。
