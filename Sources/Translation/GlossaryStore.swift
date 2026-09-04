@@ -95,6 +95,24 @@ final class GlossaryStore: ObservableObject {
         save()
     }
 
+    /// 直接編輯一筆既有條目(用 `id` 找,不是用比對 key 找)——跟 `upsert`
+    /// 的差別在於這裡**允許修改原文本身**。實際情境:自動查找/wiki 抽取
+    /// 的候選拼法,有時跟這個站實際 OCR 出來的拼法對不上(見 `notes/`
+    /// 「這樣自動搜尋的名詞就對不上了」那筆討論),原本只能刪掉重新從
+    /// 除錯清單釘選一次,現在可以直接在詞庫畫面把原文改成對得上的拼法。
+    /// 用 `id` 定位而不是重新比對 key,是因為原文本身可能就是這次要改的
+    /// 東西,不能拿舊原文的 key 去找。
+    func update(id: UUID, original: String, translated: String) {
+        guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
+        let key = Self.normalize(original)
+        let cleanTranslated = translated.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty, !cleanTranslated.isEmpty else { return }
+        entries[index].original = original
+        entries[index].translated = cleanTranslated
+        rebuildIndex()
+        save()
+    }
+
     func remove(id: UUID) {
         entries.removeAll { $0.id == id }
         rebuildIndex()

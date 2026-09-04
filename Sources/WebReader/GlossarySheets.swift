@@ -62,6 +62,9 @@ struct GlossaryListSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var showSearchSheet = false
     @State private var prefilledSeriesTitle = ""
+    /// 點列進來編輯——跟 `GlossaryPinSheet`(從除錯清單釘選,原文唯讀)
+    /// 不同,這裡原文也能改,見 `GlossaryStore.update` 的說明。
+    @State private var editingEntry: GlossaryEntry?
 
     var body: some View {
         NavigationStack {
@@ -77,12 +80,17 @@ struct GlossaryListSheet: View {
                         .foregroundStyle(.secondary)
                 }
                 ForEach(glossary.entries) { entry in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(entry.original)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Text(entry.translated)
+                    Button {
+                        editingEntry = entry
+                    } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(entry.original)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text(entry.translated)
+                        }
                     }
+                    .buttonStyle(.plain)
                 }
                 .onDelete { offsets in
                     glossary.remove(atOffsets: offsets)
@@ -111,6 +119,53 @@ struct GlossaryListSheet: View {
             GlossarySearchSheet(
                 seriesTitle: prefilledSeriesTitle, sourceLanguageCode: sourceLanguageCode,
                 mangaOrigin: mangaOrigin, glossary: glossary, vlmEngine: vlmEngine)
+        }
+        .sheet(item: $editingEntry) { entry in
+            GlossaryEditSheet(entryID: entry.id, original: entry.original, translated: entry.translated, glossary: glossary)
+        }
+    }
+}
+
+/// 編輯一筆既有詞庫條目——原文跟譯文都能改(跟 `GlossaryPinSheet` 不同,
+/// 那個是從除錯清單釘選、原文必須鎖死跟 OCR 一致;這裡是使用者主動管理
+/// 自己的詞庫,允許修正原文拼法,用來對齊「自動查找抓到的拼法跟這個站
+/// 實際 OCR 拼法對不上」這種情況,不用整筆刪掉重釘)。
+struct GlossaryEditSheet: View {
+    let entryID: UUID
+    @State var original: String
+    @State var translated: String
+    @ObservedObject var glossary: GlossaryStore
+    @Environment(\.dismiss) private var dismiss
+
+    private var canSave: Bool {
+        !original.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !translated.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("原文") {
+                    TextField("原文", text: $original)
+                }
+                Section("譯文") {
+                    TextField("譯文", text: $translated)
+                }
+            }
+            .navigationTitle("編輯詞庫")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("儲存") {
+                        glossary.update(id: entryID, original: original, translated: translated)
+                        dismiss()
+                    }
+                    .disabled(!canSave)
+                }
+            }
         }
     }
 }
