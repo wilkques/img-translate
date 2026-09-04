@@ -28,6 +28,12 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
         /// parseTextOnly` 的說明),沒有原始輸出就無法診斷是解析邏輯的問題
         /// 還是模型本身的問題。讀圖路線不用這個欄位,維持空字串。
         var rawOutput: String = ""
+        /// 2026-09-04:純文字模式專用——Vision 第 2、3 名候選字串(見
+        /// `RegionMerger.TextRegion.visionAlternates`),塞進純文字翻譯 prompt
+        /// 當「其他可能讀法」的提示。展開除錯清單看得到候選字串裡有沒有出現
+        /// 正確拼法,才能判斷「翻譯還是不準」是候選本身就沒有正確答案、還是
+        /// 模型沒理會候選——不加這個只能瞎猜。讀圖路線不用這個欄位。
+        var ocrAlternates: String = ""
     }
 
     struct ImageProbe: Identifiable {
@@ -301,6 +307,22 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
         processQueueIfNeeded()
     }
 
+    /// 2026-09-04:給「關閉模型」用——這個專案已經踩過一次「邊跑推理邊卸載
+    /// 模型」的坑(見 `notes/2026-09-02.md`,`SIGABRT`,卸載動作跟 Metal 命令
+    /// 佇列的非同步完成回呼搶時序)。「關閉模型」是使用者隨時可能按下的
+    /// 主動操作,時機完全不可控,呼叫端(`MangaReaderView`)必須先呼叫這個
+    /// 函式確定佇列真的閒置下來,才可以呼叫 `vlmEngine.unload()`。
+    ///
+    /// 先設 `isPaused = true` 讓佇列不再啟動新工作,再輪詢既有的
+    /// `isProcessingQueue`(不新增額外狀態,直接用現有的旗標)直到目前這個
+    /// 工作真的跑完。輪詢間隔 200ms 相對於推理動輒數秒的耗時可以忽略。
+    func pauseAndWaitUntilIdle() async {
+        isPaused = true
+        while isProcessingQueue {
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+    }
+
     private func runTranslation(url: URL, image: UIImage) async {
         guard let elementId = elementIdByURL[url] else { return }
         updateStatus(for: url) { $0 = .translating }
@@ -358,12 +380,14 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
         // (見該檔案的說明)。這是為了乾淨對照兩條路線,不要混在一起跑。
         if useTextOnlyTranslation {
             for region in regions {
+                let alternatesText = region.visionAlternates.joined(separator: " / ")
                 guard let result = try? await vlmEngine.translateText(
                     region.visionText, from: sourceLanguage, to: targetLanguage,
                     context: recentTextTranslations, ocrAlternates: region.visionAlternates) else {
                     blockDebugs.append(BlockDebug(
                         visionText: region.visionText, recognizedText: region.visionText,
-                        translatedText: VLMTranslationEngine.failureMessage, source: "純文字,失敗"))
+                        translatedText: VLMTranslationEngine.failureMessage, source: "純文字,失敗",
+                        ocrAlternates: alternatesText))
                     continue
                 }
                 let translated = result.translated
@@ -371,7 +395,7 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
                     visionText: region.visionText, recognizedText: region.visionText,
                     translatedText: translated,
                     source: translated == VLMTranslationEngine.failureMessage ? "純文字,失敗" : "純文字",
-                    rawOutput: result.rawOutput))
+                    rawOutput: result.rawOutput, ocrAlternates: alternatesText))
                 guard translated != VLMTranslationEngine.failureMessage else { continue }
                 // 只有真的翻成功才存進上下文——失敗訊息本身不是有效的譯文,
                 // 存進去只會誤導後面的呼叫。

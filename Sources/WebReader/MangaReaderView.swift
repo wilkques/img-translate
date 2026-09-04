@@ -184,11 +184,28 @@ struct MangaReaderView: View {
             // 讓使用者按下「開始翻譯」的當下要多等一段載入+暖機時間。這顆
             // 按鈕不管有沒有下載過都呼叫同一個 `ensureLoaded()`(沒下載會先
             // 下載,下載過的直接載入),讓使用者可以提早把模型準備好。
-            Button("啟動模型") {
-                Task { try? await vlmEngine.ensureLoaded() }
+            //
+            // ⚠️ 2026-09-04:Cyril 進一步要求模型也要能主動關閉,釋放手機
+            // 效能/記憶體。就緒後這顆按鈕變成「關閉模型」——但**不能**直接
+            // 呼叫 `unload()`:這個專案已經踩過「邊跑推理邊卸載模型」的坑
+            // (`SIGABRT`,卸載動作跟 Metal 命令佇列的非同步完成回呼搶時序,
+            // 見 `notes/2026-09-02.md`)。「關閉模型」是使用者隨時可能按下的
+            // 操作,時機更不可控,一定要先呼叫 `coordinator.pauseAndWaitUntilIdle()`
+            // 確定佇列真的閒置(暫停佇列+等目前這塊推理真的跑完)才能卸載。
+            // 關閉後佇列維持暫停,不自動恢復——要繼續翻譯使用者要自己按
+            // 「繼續」,不應該有東西在背後偷偷重新觸發載入。
+            Button(vlmEngine.phase == .ready ? "關閉模型" : "啟動模型") {
+                if vlmEngine.phase == .ready {
+                    Task {
+                        await coordinator.pauseAndWaitUntilIdle()
+                        vlmEngine.unload()
+                    }
+                } else {
+                    Task { try? await vlmEngine.ensureLoaded() }
+                }
             }
             .font(.caption2)
-            .disabled(Self.isModelBusyOrReady(vlmEngine.phase))
+            .disabled(Self.isModelTransitioning(vlmEngine.phase))
 
             // 用自訂 Binding 呼叫 `changeModel(to:)`,不能直接綁 `$vlmEngine.selectedModel`
             // ——直接綁會跳過「換模型前要先卸載舊模型」的保護,`ensureLoaded()`
@@ -235,10 +252,13 @@ struct MangaReaderView: View {
 
     /// 「啟動模型」按鈕的可按條件——已經就緒或正在忙(下載/載入/暖機/
     /// 翻譯中)就不用讓使用者再按一次,只有 `.idle`/`.failed` 才有意義。
-    private static func isModelBusyOrReady(_ phase: VLMTranslationEngine.Phase) -> Bool {
+    /// 「啟動模型/關閉模型」按鈕的可按條件——`.ready` 現在也要可按(對應
+    /// 「關閉模型」),只有下載/載入/暖機/翻譯這幾個**過渡中**的狀態才 disable,
+    /// 中途啟動或關閉會留下不一致狀態。
+    private static func isModelTransitioning(_ phase: VLMTranslationEngine.Phase) -> Bool {
         switch phase {
-        case .idle, .failed: return false
-        case .downloading, .loadingWeights, .warmingUp, .ready, .translating: return true
+        case .idle, .failed, .ready: return false
+        case .downloading, .loadingWeights, .warmingUp, .translating: return true
         }
     }
 
@@ -345,6 +365,13 @@ struct MangaReaderView: View {
                                                 if !block.rawOutput.isEmpty {
                                                     Text("原始輸出:\(block.rawOutput)")
                                                         .foregroundStyle(.orange)
+                                                }
+                                                // 2026-09-04:純文字模式才會有值——Vision 第 2、3 名
+                                                // 候選字串,展開來看得出「翻譯還是不準」是候選本身就
+                                                // 沒有正確拼法、還是模型沒理會候選,不用再瞎猜。
+                                                if !block.ocrAlternates.isEmpty {
+                                                    Text("OCR候選:\(block.ocrAlternates)")
+                                                        .foregroundStyle(.blue)
                                                 }
                                             }
                                         }

@@ -45,6 +45,15 @@ enum TextRecognizer {
                 }
                 continuation.resume(returning: blocks)
             }
+            // ⚠️ 2026-09-04:Cyril 對照 Safari 的「即時文字辨識」發現同一段
+            // 難字(`NA MUGYEOM`)Safari 讀得出來、我們讀成 `NA MLGYEOM`。
+            // 兩邊底層都是 Vision 框架,但我們原本完全沒指定 `revision`,吃
+            // 系統預設值——Vision 文字辨識這幾年有明顯升級過準確度的版本,
+            // Safari 這種第一方系統功能通常會用最新的。明確指定裝置支援的
+            // 最新 revision,純設定改動,不影響任何 prompt/解析邏輯。
+            if let latestRevision = VNRecognizeTextRequest.supportedRevisions.max() {
+                request.revision = latestRevision
+            }
             request.recognitionLevel = .accurate
             // ⚠️ 2026-09-03:原本是 `true`。這個選項的設計目的是把辨識結果修正成
             // 字典裡的真實單字——但漫畫狀聲詞/喊叫聲(`UWA`、`GRRRAAAGH`)本來就

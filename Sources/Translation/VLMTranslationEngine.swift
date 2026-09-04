@@ -403,9 +403,17 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
                 .trimmingCharacters(in: .whitespaces)
             break
         }
-        if translated.isEmpty {
+        let usedFallback = translated.isEmpty
+        if usedFallback {
             translated = raw.replacingOccurrences(of: "```", with: "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
+            // 防呆:裝機實測抓到模型完全沒寫出冒號,直接卡在標籤字本身的
+            // 殘缺片段,例如「TRANSLA!」「TRANSLA 196」——不是重複詞(只出現
+            // 一次,`isDegenerateWordRepeat` 抓不到),也沒有冒號可以讓上面
+            // 的迴圈找到。判斷依據:去標點後的第一個詞以 TRANSLA 開頭,而且
+            // 剩下的內容很短(≤3 字或只是數字)——這種情況判定是模型卡在
+            // 標籤字這個殘缺片段,不是真的翻譯內容,直接判定失敗。
+            if Self.isBareLabelFragment(translated) { return failureMessage }
         }
         // 防呆:即使 prompt 已經改成具體範例、明講不要加角括號,模型偶爾還是
         // 可能把舊習慣的佔位符號格式帶進來(裝機實測案例:"<巴別了>"、
@@ -456,6 +464,20 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
             }
         }
         return false
+    }
+
+    /// 偵測「整段文字就只是標籤字本身的殘缺片段」,例如「TRANSLA!」
+    /// 「TRANSLA 196」——第一個詞(去標點後)以 TRANSLA 開頭,且後面剩下的
+    /// 內容很短或只是數字,代表模型卡在寫標籤字這一步就中斷了,不是真的
+    /// 翻譯內容。只在 `parseTextOnly` 的 fallback 分支(完全找不到冒號時)
+    /// 呼叫,不影響正常帶冒號、成功解析出譯文的情況。
+    private nonisolated static func isBareLabelFragment(_ s: String) -> Bool {
+        let tokens = s.split(separator: " ")
+            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "!.,;:?？！¡¿")) }
+            .filter { !$0.isEmpty }
+        guard let first = tokens.first, first.uppercased().hasPrefix("TRANSLA") else { return false }
+        let rest = tokens.dropFirst().joined(separator: " ")
+        return rest.count <= 3 || rest.allSatisfy { $0.isNumber || $0.isWhitespace }
     }
 
     private nonisolated static func stripEchoedOriginalPrefix(from translated: String, original: String) -> String? {
