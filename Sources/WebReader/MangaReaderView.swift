@@ -45,6 +45,15 @@ struct MangaReaderView: View {
         ("zh-Hant-TW", "繁體中文(台灣)")
     ]
 
+    /// 只影響純文字模式的 prompt(見 `VLMTranslationEngine.makeTextOnlyPrompt`
+    /// 的 `mangaOrigin` 參數)——幫模型判斷不認識的字大概率是人名,該用哪個
+    /// 語系的音譯慣例,而不是亂猜或意譯。
+    private let mangaOriginOptions: [(code: String, label: String)] = [
+        ("other", "其他"),
+        ("ja", "日漫"),
+        ("ko", "韓漫")
+    ]
+
     init() {
         // 2026-09-02:曾經試過「每張圖處理完整個卸載模型」換回 4B 的品質,
         // 裝機直接 SIGABRT——卸載動作跟 Metal 命令佇列的非同步完成回呼搶時序,
@@ -151,6 +160,12 @@ struct MangaReaderView: View {
             Text("→")
             Picker("目標語言", selection: $coordinator.targetLanguage) {
                 ForEach(languageOptions, id: \.code) { option in
+                    Text(option.label).tag(option.code)
+                }
+            }
+            Text("·")
+            Picker("漫畫來源", selection: $coordinator.mangaOrigin) {
+                ForEach(mangaOriginOptions, id: \.code) { option in
                     Text(option.label).tag(option.code)
                 }
             }

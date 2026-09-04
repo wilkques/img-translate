@@ -59,6 +59,12 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
     @Published private(set) var pageStatus = "尚未載入"
     @Published var sourceLanguage = "es"
     @Published var targetLanguage = "zh-Hant-TW"
+    /// 漫畫來源提示,只影響純文字模式的 prompt(`VLMTranslationEngine.
+    /// makeTextOnlyPrompt`)——"other" 時完全不改變 prompt(byte-identical),
+    /// "ja"/"ko" 時加一句提示:不認識的字大概率是人名,音譯不要意譯。
+    /// 起因:`NA MUGYEOM` 這個韓文羅馬拼音人名被兩顆模型都翻壞,見
+    /// `notes/2026-09-03.md`。
+    @Published var mangaOrigin = "other"
 
     /// 「整話先翻完再看」模式的狀態——見 `startPreTranslateAll` 的說明。
     /// `preTranslateTotal` 用 `Int?`(不是 0)區分「還不知道有幾張」跟
@@ -415,7 +421,8 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
                 // 新增的「LiveText:」欄位顯示 `liveText`,方便對照兩者差異。
                 guard let result = try? await vlmEngine.translateText(
                     region.bestText, from: sourceLanguage, to: targetLanguage,
-                    context: recentTextTranslations, ocrAlternates: region.visionAlternates) else {
+                    context: recentTextTranslations, ocrAlternates: region.visionAlternates,
+                    mangaOrigin: mangaOrigin) else {
                     blockDebugs.append(BlockDebug(
                         visionText: region.visionText, recognizedText: region.bestText,
                         translatedText: VLMTranslationEngine.failureMessage, source: "純文字,失敗",

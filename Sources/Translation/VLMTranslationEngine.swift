@@ -288,15 +288,18 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     func translateText(
         _ text: String, from source: String, to target: String,
         context: [(original: String, translated: String)] = [],
-        ocrAlternates: [String] = []
+        ocrAlternates: [String] = [],
+        mangaOrigin: String = "other"
     ) async throws -> (translated: String, rawOutput: String) {
         let maxRetries = 2
         var lastResult = try await translateTextOnce(
-            text, from: source, to: target, context: context, ocrAlternates: ocrAlternates)
+            text, from: source, to: target, context: context, ocrAlternates: ocrAlternates,
+            mangaOrigin: mangaOrigin)
         guard lastResult.translated == Self.failureMessage else { return lastResult }
         for _ in 0..<maxRetries {
             lastResult = try await translateTextOnce(
-                text, from: source, to: target, context: context, ocrAlternates: ocrAlternates)
+                text, from: source, to: target, context: context, ocrAlternates: ocrAlternates,
+                mangaOrigin: mangaOrigin)
             if lastResult.translated != Self.failureMessage { return lastResult }
         }
         return lastResult
@@ -305,14 +308,15 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     private func translateTextOnce(
         _ text: String, from source: String, to target: String,
         context: [(original: String, translated: String)],
-        ocrAlternates: [String]
+        ocrAlternates: [String],
+        mangaOrigin: String
     ) async throws -> (translated: String, rawOutput: String) {
         let sourceName = try LanguageNames.name(for: source)
         let targetName = try LanguageNames.name(for: target)
         let container = try await ensureLoaded()
         let prompt = Self.makeTextOnlyPrompt(
             source: sourceName, target: targetName, text: text, context: context,
-            ocrAlternates: ocrAlternates)
+            ocrAlternates: ocrAlternates, mangaOrigin: mangaOrigin)
 
         let userInput = UserInput(chat: [.user(prompt, images: [])])
         let lmInput = try await container.prepare(input: userInput)
@@ -360,10 +364,22 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     ///    刻拼字修正邏輯更划算。
     /// 2. 加一句要求保留刪節號「...」——裝機實測發現模型會把 `HMM...` 的
     ///    刪節號改寫成冒號(「唔唔：我不太確定」),語意上還說得通但風格跑掉。
+    ///
+    /// ⚠️ 2026-09-04:新增 `mangaOrigin`(日漫/韓漫/其他)——起因是 `NA
+    /// MUGYEOM`(韓文羅馬拼音人名)被 `Qwen3-VL-4B`/`Gemma 3 4B` 都翻壞(見
+    /// `notes/2026-09-03.md`)。跟 `contextBlock`/`alternatesLine` 同一種
+    /// 「附加子句、不適用時留空字串」寫法——`mangaOrigin == "other"` 時
+    /// `originHint` 是空字串,產生的 prompt 跟改動前逐字元相同。**只加在這份
+    /// 純文字 prompt**:上面第 700 行那則教訓明講過,在 `makePrompt`(讀圖路線
+    /// 那份已裝機驗證十幾輪的 prompt)加一句「人名也要音譯」裝機實測是負分、
+    /// 已經 revert——那份 prompt 對總指令量極度敏感,`makePrompt`/
+    /// `makeRetryPrompt`/`makePagePrompt` 這三份讀圖路線的 prompt 這次刻意
+    /// 不動。
     private static func makeTextOnlyPrompt(
         source: String, target: String, text: String,
         context: [(original: String, translated: String)],
-        ocrAlternates: [String]
+        ocrAlternates: [String],
+        mangaOrigin: String
     ) -> String {
         var contextBlock = ""
         if !context.isEmpty {
@@ -387,6 +403,29 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
             """
         }
 
+        var originHint = ""
+        switch mangaOrigin {
+        case "ko":
+            originHint = """
+             This is a Korean webtoon. If a word looks like an unrecognised proper name \
+            (for example written in Latin-alphabet romanization, like "NA MUGYEOM"), it is a \
+            Korean person's name, not an ordinary word or a shout — transliterate it \
+            phonetically into \(target) syllable-by-syllable using conventional Korean-name \
+            Hanzi choices, do not repeat or drop syllables, and do not translate its literal \
+            meaning.
+            """
+        case "ja":
+            originHint = """
+             This is a Japanese manga. If a word looks like an unrecognised proper name (for \
+            example written in Latin-alphabet romanization), it is a Japanese person's name, \
+            not an ordinary word or a shout — transliterate it phonetically into \(target) \
+            syllable-by-syllable using conventional Japanese-name Hanzi/Kanji choices, do not \
+            repeat or drop syllables, and do not translate its literal meaning.
+            """
+        default:
+            break
+        }
+
         return """
         \(contextBlock)Translate the following \(source) comic dialogue into \(target). You must always \
         give an actual \(target) translation — never leave the text unchanged or just copy \
@@ -395,7 +434,7 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         repeated letters — if so, transliterate the sound into \(target) instead of \
         translating its literal meaning, and keep any repeated sound short (2-4 repeats is \
         enough). If the original has an ellipsis "...", keep it as "..." in your translation \
-        instead of changing it to a colon or other punctuation.
+        instead of changing it to a colon or other punctuation.\(originHint)
 
         Text: \(text)\(alternatesLine)
 
