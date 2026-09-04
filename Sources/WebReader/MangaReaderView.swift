@@ -69,7 +69,8 @@ struct MangaReaderView: View {
     private let mangaOriginOptions: [(code: String, label: String)] = [
         ("other", "其他"),
         ("ja", "日漫"),
-        ("ko", "韓漫")
+        ("ko", "韓漫"),
+        ("cn", "國漫")
     ]
 
     init() {

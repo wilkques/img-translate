@@ -432,6 +432,13 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     /// 示範「只有名字留羅馬拼音,其餘照常翻譯」的樣子("Kim Minsu"→
     /// 「如果 Kim Minsu 想做,他就會做到」)。`ja` 分支比照同步修改。這輪
     /// 還沒裝機驗證。
+    ///
+    /// ⚠️ 2026-09-04:新增 `cn`(國漫/中國漫畫)選項。跟 `ko`/`ja` 性質不
+    /// 同——原文本來就是中文,羅馬拼音是**漢語拼音**,不是外語轉寫成漢字,
+    /// 所以規則是「拼音轉回原本的漢字」而不是「幫外語名字挑漢字音譯」,
+    /// 措辭上明講這個差異(避免模型把拼音當成外國名字重新發明一套音譯)。
+    /// 從一開始就套用 v5 學到的教訓(規則只適用於名字本身、附完整範例),
+    /// 不用重新踩一次「整句退化」的坑。這輪還沒裝機驗證。
     private static func makeTextOnlyPrompt(
         source: String, target: String, text: String,
         context: [(original: String, translated: String)],
@@ -500,6 +507,25 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
             the Chinese name for "Taro Yamada", the correct whole reply is: \
             如果 Taro Yamada 想做,他就會做到 — only the name stays in Latin letters, everything \
             around it is ordinary \(target).
+            """
+        case "cn":
+            originHint = """
+             This is a Chinese manhua, originally written in Chinese, but you must still \
+            answer only in \(target). If a word looks like an unrecognised proper name (for \
+            example written in Pinyin romanization, like "Li Ming"), it is almost certainly \
+            a Chinese person's name or place name that was originally written in Chinese \
+            characters — convert it back to the original Hanzi using common Pinyin-to-Hanzi \
+            name conventions, rather than inventing a new transliteration as if it were a \
+            foreign name. Pinyin without tone marks can match many different characters, so \
+            if you are not confident which characters are correct, keep just that name \
+            exactly as written in the original Pinyin spelling, unchanged, rather than \
+            guessing incorrect characters. This only applies to the name itself — every \
+            other word in the sentence must still be translated into \(target) as normal, \
+            never left in English or any other language. For example, if the original (in \
+            some other language) says something like "If Li Ming wants to do it, he will do \
+            it", and you are not confident of the correct characters for "Li Ming", the \
+            correct whole reply is: 如果 Li Ming 想做,他就會做到 — only the name stays in \
+            Pinyin, everything around it is ordinary \(target).
             """
         default:
             break
@@ -1283,6 +1309,10 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         case "ja":
             originClause = "These are character/place names from a Japanese manga, in confirmed correct " +
                 "English romanization. Use conventional Japanese-name Hanzi/Kanji-reading choices."
+        case "cn":
+            originClause = "These are character/place names from a Chinese manhua, in confirmed correct " +
+                "Pinyin romanization. Convert each back to the original Hanzi using common " +
+                "Pinyin-to-Hanzi name conventions, rather than inventing a foreign-name transliteration."
         default:
             originClause = "These are character/place names from a comic, in confirmed correct English spelling."
         }
