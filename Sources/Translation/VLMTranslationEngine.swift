@@ -383,6 +383,18 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     /// 判斷「這大概是人名」,不是叫它用來源語系的文字回答**——第一版沒有明講
     /// 「不管如何都只能用 `target` 回答,不准出現韓文/日文原生文字」,已修正
     /// 加上這條硬性規定。
+    ///
+    /// ⚠️ 2026-09-04(第三版):第二版裝機驗證確認語言洩漏修好,但音節重複的
+    /// 根本問題還在——`NA MUGYEOM`(3 音節)先後翻成「娜娜穆耶歐姆」(6 字)、
+    /// 「娜娜穆根」(4 字),從沒對到剛好 3 字。「不要重複/丟音節」這種抽象
+    /// 規則顯然沒被遵守,改成更具體、可驗證的規則:**明講「羅馬拼音有幾個
+    /// 音節,答案就該有幾個漢字」**,並比照 prompt 結尾「HOLA→你好」的手法
+    /// 給一個完整範例("Kim Min Jun"→金民俊)。**只改 `ko` 分支,`ja` 不動**
+    /// ——韓文姓名漢字音譯接近「一個諺文音節對一個漢字」,這個規則對韓文成立;
+    /// 日文姓名的漢字讀音常常是「一個漢字對應多個假名音節」(例如「山田」=
+    /// やまだ,3 假名對 2 漢字),套用同一條規則到日文會是錯的指示,而且目前
+    /// 也還沒有日漫測試素材驗證過 `ja` 分支有沒有問題,不需要在沒有證據時
+    /// 跟著改。
     private static func makeTextOnlyPrompt(
         source: String, target: String, text: String,
         context: [(original: String, translated: String)],
@@ -421,8 +433,13 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
             proper name (for example written in Latin-alphabet romanization, like "NA \
             MUGYEOM"), treat it as a Korean person's name, not an ordinary word or a shout, \
             and transliterate it phonetically into \(target) syllable-by-syllable using \
-            conventional Korean-name Hanzi choices — do not repeat or drop syllables, and do \
-            not translate its literal meaning.
+            conventional Korean-name Hanzi choices. Each Korean syllable becomes exactly \
+            one Hanzi character — count the syllables in the romanized name and your \
+            answer must have exactly that many characters, never more (do not repeat a \
+            syllable's character) and never fewer (do not merge two syllables into one \
+            character). For example, the 3-syllable name "Kim Min Jun" becomes the \
+            3-character name 金民俊 (Kim→金, Min→民, Jun→俊) — not 4 characters and not \
+            2. Do not translate the name's literal meaning.
             """
         case "ja":
             originHint = """
