@@ -332,3 +332,153 @@ enum GlossaryWikiSearch {
         return (readableURL, truncated)
     }
 }
+
+/// 詞庫「自動查找」的 Fandom 備援結果——找到的 wiki 網址跟角色名單
+/// (**英文原文,不是中文**)。交給 `VLMTranslationEngine.
+/// transliterateNameList` 生成中文候選——那一步是**生成,不是查表**,
+/// 可靠度天生比 `GlossaryWikiSearch`(維基百科中文條目是查表結果)低,
+/// UI 必須清楚標示,不能讓使用者誤以為兩種來源品質一樣。
+struct GlossaryFandomSearchResult {
+    let wikiTitle: String
+    let wikiURL: URL
+    let characterNames: [String]
+}
+
+/// 只在維基百科查不到時才呼叫(見 `GlossarySearchSheet.search`)。
+///
+/// ⚠️ 2026-09-04:起因——`Designated Bully`(= 西班牙文版「El matón a
+/// cargo」)維基百科完全沒有條目(英文、西班牙文、韓文羅馬拼音三種標題
+/// 都用 `curl` 查證過,見 `notes/`),但確實有專屬 Fandom wiki
+/// (`designated-bully.fandom.com`),裡面有結構清楚的「Characters」分類,
+/// 角色名單(`Kwon Daegun`、`Park Heejun` 等)跟實際 OCR 拼法對得上。
+///
+/// **不走 Fandom 的跨 wiki 搜尋 API**——那個已經證實會被 Cloudflare 擋
+/// (HTTP 403,見 `GlossaryWikiSearch` 的說明)。改用**猜網域規則**:
+/// Fandom wiki 網域慣例就是標題轉小寫、空白換連字號,「Designated
+/// Bully」→`designated-bully`,剛好就是真實網址。這不是網路搜尋,是
+/// 確定性的字串轉換 + 直接打對那個網域自己的 `api.php`(已驗證這條路
+/// 沒被擋)——**代價是需要使用者自己輸入正確的英文標題,猜錯 slug 就是
+/// 猜不到,不會有第二層備援去找正確 slug**。
+enum GlossaryFandomSearch {
+
+    private struct SiteInfoResponse: Decodable {
+        struct Query: Decodable {
+            struct General: Decodable {
+                let sitename: String
+            }
+            let general: General
+        }
+        let query: Query
+    }
+
+    private struct CategoryMembersResponse: Decodable {
+        struct Query: Decodable {
+            struct Member: Decodable {
+                let title: String
+                let ns: Int
+            }
+            let categorymembers: [Member]
+        }
+        let query: Query
+    }
+
+    /// 依序嘗試的分類名稱——「Characters」最常見,「Main Characters」是
+    /// 備用(這個測試 wiki 兩個分類都有,但只有前者抓到完整名單)。
+    private static let characterCategoryNames = ["Characters", "Main Characters"]
+
+    static func search(seriesTitle: String) async throws -> GlossaryFandomSearchResult {
+        let slug = slugify(seriesTitle)
+        guard !slug.isEmpty else {
+            throw GlossaryWikiSearchError.notFound(stage: "作品名稱是空的,無法猜測 Fandom 網域")
+        }
+
+        let session = URLSession(configuration: .ephemeral)
+
+        guard let siteName = try await fetchSiteName(slug: slug, session: session) else {
+            throw GlossaryWikiSearchError.notFound(
+                stage: "猜測的 Fandom 網域「\(slug).fandom.com」不存在(這是猜測,不是保證,可能是這個系列沒有專屬 wiki,或標題跟 wiki 網域命名不一致)")
+        }
+
+        var names: [String] = []
+        for category in characterCategoryNames {
+            names = try await fetchCategoryMemberTitles(slug: slug, category: category, session: session)
+            if !names.isEmpty { break }
+        }
+        guard !names.isEmpty else {
+            throw GlossaryWikiSearchError.notFound(
+                stage: "找到 Fandom wiki「\(siteName)」,但沒有找到角色分類頁面")
+        }
+
+        let wikiURL = URL(string: "https://\(slug).fandom.com/wiki/\(siteName.replacingOccurrences(of: " ", with: "_"))")
+            ?? URL(string: "https://\(slug).fandom.com")!
+
+        return GlossaryFandomSearchResult(
+            wikiTitle: siteName, wikiURL: wikiURL, characterNames: Array(Set(names)).sorted())
+    }
+
+    /// 把作品名稱轉成 Fandom 網域慣用的 slug——小寫、非英數字元收成單一
+    /// 連字號,頭尾不留連字號。用真實案例驗證過:「Designated Bully」→
+    /// `designated-bully`,「Solo Leveling」→`solo-leveling`,都是真實
+    /// 存在的 Fandom 網域。
+    static func slugify(_ title: String) -> String {
+        let folded = title.folding(
+            options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+        var result = ""
+        var lastWasHyphen = true
+        for scalar in folded.unicodeScalars {
+            if CharacterSet.alphanumerics.contains(scalar) {
+                result.unicodeScalars.append(scalar)
+                lastWasHyphen = false
+            } else if !lastWasHyphen {
+                result.append("-")
+                lastWasHyphen = true
+            }
+        }
+        if result.hasSuffix("-") { result.removeLast() }
+        return result.lowercased()
+    }
+
+    /// 用 `meta=siteinfo` 確認猜的網域真的存在——這是最輕量的存在性檢查,
+    /// 不假設任何特定分類/頁面一定存在。
+    private static func fetchSiteName(slug: String, session: URLSession) async throws -> String? {
+        var components = URLComponents(string: "https://\(slug).fandom.com/api.php")!
+        components.queryItems = [
+            URLQueryItem(name: "action", value: "query"),
+            URLQueryItem(name: "meta", value: "siteinfo"),
+            URLQueryItem(name: "siprop", value: "general"),
+            URLQueryItem(name: "format", value: "json")
+        ]
+        guard let url = components.url else { return nil }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 10
+
+        guard let (data, _) = try? await session.data(for: request),
+              let decoded = try? JSONDecoder().decode(SiteInfoResponse.self, from: data)
+        else { return nil }
+        return decoded.query.general.sitename
+    }
+
+    /// 只留一般條目(`ns == 0`),排除子分類本身(`Category:Main
+    /// Characters` 這種 `ns == 14` 的項目,已經在裝機前用真實請求確認過
+    /// 這個測試 wiki 的 `Category:Characters` 底下混了一個子分類進來)。
+    private static func fetchCategoryMemberTitles(
+        slug: String, category: String, session: URLSession
+    ) async throws -> [String] {
+        var components = URLComponents(string: "https://\(slug).fandom.com/api.php")!
+        components.queryItems = [
+            URLQueryItem(name: "action", value: "query"),
+            URLQueryItem(name: "list", value: "categorymembers"),
+            URLQueryItem(name: "cmtitle", value: "Category:\(category)"),
+            URLQueryItem(name: "cmlimit", value: "50"),
+            URLQueryItem(name: "format", value: "json")
+        ]
+        guard let url = components.url else { return [] }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 10
+
+        guard let (data, _) = try? await session.data(for: request),
+              let decoded = try? JSONDecoder().decode(CategoryMembersResponse.self, from: data)
+        else { return [] }
+        return decoded.query.categorymembers.filter { $0.ns == 0 }.map(\.title)
+    }
+}

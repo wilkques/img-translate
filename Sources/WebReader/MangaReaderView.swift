@@ -189,7 +189,8 @@ struct MangaReaderView: View {
             case .list:
                 GlossaryListSheet(
                     glossary: glossary, sourceLanguageCode: coordinator.sourceLanguage,
-                    vlmEngine: vlmEngine, fetchPageTitle: { await coordinator.fetchPageTitle() })
+                    mangaOrigin: coordinator.mangaOrigin, vlmEngine: vlmEngine,
+                    fetchPageTitle: { await coordinator.fetchPageTitle() })
             }
         }
     }

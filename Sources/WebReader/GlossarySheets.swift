@@ -56,6 +56,7 @@ struct GlossaryPinSheet: View {
 struct GlossaryListSheet: View {
     @ObservedObject var glossary: GlossaryStore
     let sourceLanguageCode: String
+    let mangaOrigin: String
     let vlmEngine: VLMTranslationEngine
     let fetchPageTitle: () async -> String
     @Environment(\.dismiss) private var dismiss
@@ -109,7 +110,7 @@ struct GlossaryListSheet: View {
         .sheet(isPresented: $showSearchSheet) {
             GlossarySearchSheet(
                 seriesTitle: prefilledSeriesTitle, sourceLanguageCode: sourceLanguageCode,
-                glossary: glossary, vlmEngine: vlmEngine)
+                mangaOrigin: mangaOrigin, glossary: glossary, vlmEngine: vlmEngine)
         }
     }
 }
@@ -126,6 +127,7 @@ struct GlossaryListSheet: View {
 struct GlossarySearchSheet: View {
     @State var seriesTitle: String
     let sourceLanguageCode: String
+    let mangaOrigin: String
     @ObservedObject var glossary: GlossaryStore
     let vlmEngine: VLMTranslationEngine
     @Environment(\.dismiss) private var dismiss
@@ -144,6 +146,10 @@ struct GlossarySearchSheet: View {
     /// 找到條目時記下來源網址,提供一個「自己去核對」的連結——自動抽取
     /// 的結果不該是黑盒子,使用者可以直接點過去看原始 wiki 條目。
     @State private var foundArticleURL: URL?
+    /// `true` 代表這批候選來自 Fandom 備援(`transliterateNameList` 生成),
+    /// `false` 代表來自維基百科中文條目(`extractGlossaryCandidates` 查表)。
+    /// 兩種可信度天差地遠,見下面 §Fandom 備援的說明,畫面上必須清楚區分。
+    @State private var candidatesAreGenerated = false
 
     private var selectedCount: Int {
         candidates.filter { $0.isSelected }.count
@@ -186,6 +192,13 @@ struct GlossarySearchSheet: View {
                 }
 
                 if !candidates.isEmpty {
+                    if candidatesAreGenerated {
+                        Section {
+                            Text("⚠️ 以下是 AI 根據 Fandom 角色名單生成的音譯猜測,不是查表結果,請仔細確認再採用")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
+                    }
                     Section("候選名單(勾選要加入詞庫的)") {
                         ForEach($candidates) { $candidate in
                             Toggle(isOn: $candidate.isSelected) {
@@ -227,6 +240,7 @@ struct GlossarySearchSheet: View {
         candidates = []
         statusText = ""
         foundArticleURL = nil
+        candidatesAreGenerated = false
         isSearching = true
         Task { @MainActor in
             do {
@@ -250,12 +264,41 @@ struct GlossarySearchSheet: View {
                 } else {
                     candidates = pairs.map { Candidate(original: $0.original, translated: $0.translated) }
                 }
-            } catch let error as GlossaryWikiSearchError {
-                isSearching = false
-                statusText = ""
-                switch error {
-                case .notFound(let stage):
-                    errorText = "\(stage),建議改用批次貼上手動輸入"
+            } catch let wikiError as GlossaryWikiSearchError {
+                // ⚠️ 2026-09-04:維基百科查不到時,加一層 Fandom 備援
+                // ——起因是「Designated Bully」(= 西班牙文版「El matón a
+                // cargo」)維基百科完全查不到(三種標題都查證過),但確實
+                // 有專屬 Fandom wiki、有結構清楚的角色分類。見
+                // `GlossaryFandomSearch` 的完整說明:這條路是**猜網域
+                // slug**,不是搜尋引擎,猜錯就是猜不到,不是另一層保證。
+                let wikiStage: String
+                if case .notFound(let stage) = wikiError { wikiStage = stage } else { wikiStage = "查詢失敗" }
+
+                statusText = "維基百科查不到,嘗試猜測 Fandom wiki…"
+                do {
+                    let fandomResult = try await GlossaryFandomSearch.search(seriesTitle: seriesTitle)
+                    foundArticleURL = fandomResult.wikiURL
+                    statusText = "AI 音譯角色名單(來自 Fandom,非查表結果)…"
+                    let pairs = try await vlmEngine.transliterateNameList(
+                        fandomResult.characterNames, mangaOrigin: mangaOrigin)
+                    isSearching = false
+                    statusText = ""
+                    if pairs.isEmpty {
+                        errorText = "找到 Fandom wiki「\(fandomResult.wikiTitle)」,但沒有生成出可用的候選"
+                    } else {
+                        candidatesAreGenerated = true
+                        candidates = pairs.map { Candidate(original: $0.original, translated: $0.translated) }
+                    }
+                } catch let fandomError as GlossaryWikiSearchError {
+                    isSearching = false
+                    statusText = ""
+                    if case .notFound(let fandomStage) = fandomError {
+                        errorText = "\(wikiStage);\(fandomStage),建議改用批次貼上手動輸入"
+                    }
+                } catch {
+                    isSearching = false
+                    statusText = ""
+                    errorText = "\(wikiStage);Fandom 查詢失敗:\(error.localizedDescription)"
                 }
             } catch {
                 isSearching = false

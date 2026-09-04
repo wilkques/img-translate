@@ -1245,6 +1245,62 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         return Self.parseGlossaryCandidates(raw.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
+    /// 詞庫「自動查找」的 **Fandom 備援**用——只在維基百科查不到、
+    /// `GlossaryFandomSearch` 猜到 Fandom wiki 並抓到角色名單時才呼叫。
+    ///
+    /// ⚠️ 2026-09-04:跟 `extractGlossaryCandidates` 本質不同,務必分清楚:
+    /// 那個是**查表**——從已經真實存在中英對照的維基百科條目裡「找出」
+    /// 已經寫在那裡的配對,模型只是負責閱讀理解,答案本來就在輸入裡。
+    /// 這個是**生成**——輸入只有確認正確的英文人名清單(沒有任何中文
+    /// 對照可抄),模型要自己生出中文音譯,等於重新回到「靠模型猜音譯」
+    /// 這個從一開始就在對付、而且四輪失敗過的老問題,只是這次輸入是
+    /// 乾淨確認過的英文拼法,不是 OCR 雜訊,品質預期會好一些但不保證
+    /// 正確。**呼叫端(`GlossarySearchSheet`)必須清楚標示這批候選是
+    /// AI 生成、不是查表結果**,不能讓使用者誤以為兩種來源可信度一樣。
+    func transliterateNameList(
+        _ names: [String], mangaOrigin: String
+    ) async throws -> [(original: String, translated: String)] {
+        let container = try await ensureLoaded()
+        let prompt = Self.makeNameListTransliterationPrompt(names: names, mangaOrigin: mangaOrigin)
+        let userInput = UserInput(chat: [.user(prompt, images: [])])
+        let lmInput = try await container.prepare(input: userInput)
+        let stream = try await container.generate(
+            input: lmInput, parameters: glossaryExtractionGenerateParameters)
+
+        var raw = ""
+        for await event in stream {
+            if let chunk = event.chunk { raw += chunk }
+        }
+        return Self.parseGlossaryCandidates(raw.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    private static func makeNameListTransliterationPrompt(names: [String], mangaOrigin: String) -> String {
+        let originClause: String
+        switch mangaOrigin {
+        case "ko":
+            originClause = "These are character/place names from a Korean webtoon, in confirmed correct " +
+                "English romanization. Use conventional Korean-name Hanzi choices."
+        case "ja":
+            originClause = "These are character/place names from a Japanese manga, in confirmed correct " +
+                "English romanization. Use conventional Japanese-name Hanzi/Kanji-reading choices."
+        default:
+            originClause = "These are character/place names from a comic, in confirmed correct English spelling."
+        }
+        let nameList = names.joined(separator: "\n")
+        return """
+        \(originClause) For each name below, give your best Traditional Chinese \
+        transliteration. If you are not confident of a name's transliteration, \
+        reply with the original spelling unchanged instead of guessing — do not \
+        invent an incorrect or garbled Hanzi guess.
+
+        Reply with one pair per line, in exactly this format, nothing else:
+        OriginalName -> 中文名
+
+        Names:
+        \(nameList)
+        """
+    }
+
     /// 全新、獨立的 prompt——跟 `makePrompt`/`makeRetryPrompt`/
     /// `makePagePrompt`/`makeTextOnlyPrompt` 完全分開,不共用也不修改任何
     /// 一份既有 prompt(那幾份都已經裝機驗證很多輪,這裡不冒風險去動它們)。
