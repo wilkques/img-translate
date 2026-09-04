@@ -395,6 +395,26 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     /// やまだ,3 假名對 2 漢字),套用同一條規則到日文會是錯的指示,而且目前
     /// 也還沒有日漫測試素材驗證過 `ja` 分支有沒有問題,不需要在沒有證據時
     /// 跟著改。
+    ///
+    /// ⚠️ 2026-09-04(第四版):第三版裝機驗證再次失敗——`NA MUGYEOM` 這次變成
+    /// 「南娜穆根」(還是 4 字,不是 3 字),證實連「音節數=漢字數」這麼具體
+    /// 的規則,這顆 4B 小模型都無法穩定遵守。Cyril 提供參考:沉浸式翻譯開源
+    /// prompt 庫(github.com/immersive-translate/prompts)的 `game.yml` 對
+    /// 專有名詞的原則是「Use the complete established official localization
+    /// ...; when no established localized form is known, preserve the source
+    /// identifier instead of guessing」——遇到不確定的專有名詞寧可保留原文,
+    /// 不要亂猜。這是策略層級的改變,不是又一次措辭微調:前三版都在要求模型
+    /// 「一定要生出漢字音譯」,逼它硬猜;這版改成「猜不準就保留原文羅馬拼音,
+    /// 不要生出錯誤/亂湊的漢字」——對讀者來說「NA MUGYEOM」比「南娜穆根」這種
+    /// 四不像漢字更看得懂,也更誠實。`ko`/`ja` 都套用同一個原則(這條規則本身
+    /// 語系無關,不像第三版的音節計數規則只對韓文成立)。
+    ///
+    /// 沉浸式翻譯真正的完整解法其實是 `{{terms_prompt}}`——一份使用者維護的
+    /// 專有名詞對照表,跨整本書/整個網站持續累積、每次都原封不動注入 prompt,
+    /// 不是叫模型每次臨場現猜。這個專案目前沒有這一層(`context` 只是最近
+    /// 20 行的滑動視窗,會過期,不是永久詞庫)。如果這版「猜不準就保留原文」
+    /// 還是不夠好,下一步應該考慮做一份持久化的人名詞庫(使用者手動釘一次
+    /// 正確譯名、之後每次都直接套用),而不是繼續在單句 prompt 裡加規則。
     private static func makeTextOnlyPrompt(
         source: String, target: String, text: String,
         context: [(original: String, translated: String)],
@@ -431,25 +451,24 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
             write your answer in Korean Hangul, even if a romanized word (like "NA") also \
             happens to spell an ordinary Korean word. If a word looks like an unrecognised \
             proper name (for example written in Latin-alphabet romanization, like "NA \
-            MUGYEOM"), treat it as a Korean person's name, not an ordinary word or a shout, \
-            and transliterate it phonetically into \(target) syllable-by-syllable using \
-            conventional Korean-name Hanzi choices. Each Korean syllable becomes exactly \
-            one Hanzi character — count the syllables in the romanized name and your \
-            answer must have exactly that many characters, never more (do not repeat a \
-            syllable's character) and never fewer (do not merge two syllables into one \
-            character). For example, the 3-syllable name "Kim Min Jun" becomes the \
-            3-character name 金民俊 (Kim→金, Min→民, Jun→俊) — not 4 characters and not \
-            2. Do not translate the name's literal meaning.
+            MUGYEOM"), it is almost certainly a Korean person's name, not an ordinary word \
+            or a shout. If you know its conventional Chinese transliteration, use that. If \
+            you are not confident of the correct transliteration, do not guess or invent \
+            characters — instead keep the name exactly as written in the original \
+            Latin-alphabet romanization, unchanged, rather than producing an incorrect or \
+            garbled Hanzi guess. Do not translate the name's literal meaning.
             """
         case "ja":
             originHint = """
              This is a Japanese manga, but you must still answer only in \(target) — never \
             write your answer in Japanese Hiragana, Katakana or Kanji. If a word looks like \
             an unrecognised proper name (for example written in Latin-alphabet romanization), \
-            treat it as a Japanese person's name, not an ordinary word or a shout, and \
-            transliterate it phonetically into \(target) syllable-by-syllable using \
-            conventional Japanese-name Hanzi/Kanji-reading choices — do not repeat or drop \
-            syllables, and do not translate its literal meaning.
+            it is almost certainly a Japanese person's name, not an ordinary word or a \
+            shout. If you know its conventional Chinese transliteration, use that. If you \
+            are not confident of the correct transliteration, do not guess or invent \
+            characters — instead keep the name exactly as written in the original \
+            Latin-alphabet romanization, unchanged, rather than producing an incorrect or \
+            garbled Hanzi guess. Do not translate the name's literal meaning.
             """
         default:
             break
