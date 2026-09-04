@@ -403,8 +403,36 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         if PageOutputParser.isDegenerateLine(translated) {
             translated = PageOutputParser.collapseRepeats(translated)
         }
+        // 防呆:裝機實測抓到模型卡進生成重複迴圈,吐出「TRANSLA! SLA! SLA!
+        // SLA!」這種**重複同一個詞**的輸出——這跟 `isDegenerateLine` 抓的
+        // 「同一個字元連續重複」是不同形狀(這裡是完整的詞夾雜標點重複,不是
+        // 連續同一個字元),原本的偵測完全抓不到,整段垃圾文字就直接被當
+        // 譯文顯示。這是這顆模型從專案一開始就有的老毛病(難字/喊叫聲容易
+        // 卡迴圈),讀圖路線靠寬裁圖 retry 解決,純文字模式目前沒有 retry
+        // 機制,先用偵測+判定失敗擋住,不要顯示垃圾文字。
+        guard !Self.isDegenerateWordRepeat(translated) else { return failureMessage }
         guard PageOutputParser.hasUsableContent(translated) else { return failureMessage }
         return translated
+    }
+
+    /// 偵測「同一個詞(去掉標點後)連續重複 3 次以上」——跟 `PageOutputParser.
+    /// isDegenerateLine`(同一個字元連續重複)是互補的兩種退化偵測,一個抓
+    /// 字元級迴圈,一個抓詞級迴圈。
+    private nonisolated static func isDegenerateWordRepeat(_ s: String, minRepeats: Int = 3) -> Bool {
+        let words = s.split(separator: " ")
+            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "!.,;:?¡¿")) }
+            .filter { !$0.isEmpty }
+        guard words.count >= minRepeats else { return false }
+        var runLength = 1
+        for i in 1..<words.count {
+            if words[i].caseInsensitiveCompare(words[i - 1]) == .orderedSame {
+                runLength += 1
+                if runLength >= minRepeats { return true }
+            } else {
+                runLength = 1
+            }
+        }
+        return false
     }
 
     private nonisolated static func stripEchoedOriginalPrefix(from translated: String, original: String) -> String? {
