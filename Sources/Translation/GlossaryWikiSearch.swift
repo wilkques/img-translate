@@ -110,17 +110,26 @@ enum GlossaryWikiSearch {
 
         let session = URLSession(configuration: .ephemeral)
         let sourceLang = wikipediaLanguageCode(for: sourceLanguageCode)
+        // 查過哪些語言都記下來——之前只顯示「維基百科查不到這部作品」,
+        // 使用者沒辦法從畫面上分辨「有沒有真的查過來源語言」,查詢過程的
+        // 狀態文字跑完就被最終結果蓋掉了。把查過的語言列進失敗訊息裡,
+        // 不需要另外問。
+        var triedLanguages: [String] = []
 
         onProgress("查詢\(sourceLang)維基百科…")
+        triedLanguages.append(sourceLang)
         var found = try await searchWikipedia(language: sourceLang, title: trimmedTitle, session: session)
 
         if found == nil, sourceLang != "en" {
             onProgress("查詢英文維基百科…")
+            triedLanguages.append("en")
             found = try await searchWikipedia(language: "en", title: trimmedTitle, session: session)
         }
 
         guard let (pageID, foundLanguage, foundTitle) = found else {
-            throw GlossaryWikiSearchError.notFound(stage: "維基百科查不到這部作品")
+            let languagesText = triedLanguages.joined(separator: "、")
+            let suffix = triedLanguages.count > 1 ? "都查不到" : "查不到"
+            throw GlossaryWikiSearchError.notFound(stage: "\(languagesText)維基百科\(suffix)這部作品")
         }
 
         onProgress("查詢中文對照條目…")
