@@ -262,8 +262,16 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     /// 理論上是最基本的使用情境,但**這個專案裡從沒有人這樣呼叫過**,是否
     /// 真的支援、會不會在轉圖片 token 的路徑上出問題,只能裝機驗證確認。
     ///
-    /// 刻意**沒有**重試機制(跟 `translateRegion` 不同)——這輪只是驗證基本
-    /// 假設成不成立,先看單次呼叫的品質/速度,不要一次疊加太多變因。
+    /// ⚠️ 2026-09-04:原本刻意沒有重試機制,裝機實測發現 Qwen3-VL-4B 在這個
+    /// 純文字任務上一樣有讀圖路線早就抓到的老毛病——難字容易卡進生成
+    /// 迴圈,而且每輪測試都冒出**不同形狀**的殘缺輸出(裸標籤片段、詞級
+    /// 重複、標籤跟原文黏字),與其一直加新的偵測規則堵漏洞,不如直接補上
+    /// 重試,這是模型無關的結構性修法。偵測到退化輸出(`parseTextOnly` 回傳
+    /// `failureMessage`)就用**完全相同的輸入**(同一句原文、同一份上下文、
+    /// 同一份 OCR 候選、同一個溫度)重打一次,最多重試 2 次(共 3 次嘗試,
+    /// 數字對齊 `translateRegion` 的 `maxWiderContextRetries`)。刻意不簡化
+    /// prompt、不調溫度——純文字模式沒有「裁圖範圍」這種讀圖路線能放寬的
+    /// 變因,先看純粹重試有沒有幫助,再決定要不要疊加其他變因。
     ///
     /// ⚠️ 2026-09-03:`context` 是這輪新加的——每個對話框原本是完全獨立的
     /// 一次呼叫,模型不知道同一話裡其他對話框翻了什麼,人名音譯、代名詞、
@@ -281,6 +289,23 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         _ text: String, from source: String, to target: String,
         context: [(original: String, translated: String)] = [],
         ocrAlternates: [String] = []
+    ) async throws -> (translated: String, rawOutput: String) {
+        let maxRetries = 2
+        var lastResult = try await translateTextOnce(
+            text, from: source, to: target, context: context, ocrAlternates: ocrAlternates)
+        guard lastResult.translated == Self.failureMessage else { return lastResult }
+        for _ in 0..<maxRetries {
+            lastResult = try await translateTextOnce(
+                text, from: source, to: target, context: context, ocrAlternates: ocrAlternates)
+            if lastResult.translated != Self.failureMessage { return lastResult }
+        }
+        return lastResult
+    }
+
+    private func translateTextOnce(
+        _ text: String, from source: String, to target: String,
+        context: [(original: String, translated: String)],
+        ocrAlternates: [String]
     ) async throws -> (translated: String, rawOutput: String) {
         let sourceName = try LanguageNames.name(for: source)
         let targetName = try LanguageNames.name(for: target)
@@ -471,13 +496,16 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     /// 內容很短或只是數字,代表模型卡在寫標籤字這一步就中斷了,不是真的
     /// 翻譯內容。只在 `parseTextOnly` 的 fallback 分支(完全找不到冒號時)
     /// 呼叫,不影響正常帶冒號、成功解析出譯文的情況。
+    /// ⚠️ 2026-09-04:原本用空白分詞、檢查第一個詞是否以 TRANSLA 開頭——裝機
+    /// 實測抓到新形狀「TRANSLGYSU」(懷疑是 TRANSLATION 跟原文片段黏在一起,
+    /// 沒有空格可以分詞),原本的邏輯完全失效。改成不分詞,直接把整段文字
+    /// 只留字母、轉大寫,看開頭是不是「TRANSL」子字串——不要求乾淨分詞或
+    /// 完整比對完整單字。只在 fallback 分支(完全找不到冒號時)呼叫,而且
+    /// 目標語言是中文/日文等非拉丁字母語言時,真正翻對的譯文不可能剛好用
+    /// 字母拼出「TRANSL」開頭,不會誤殺正常譯文。
     private nonisolated static func isBareLabelFragment(_ s: String) -> Bool {
-        let tokens = s.split(separator: " ")
-            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "!.,;:?？！¡¿")) }
-            .filter { !$0.isEmpty }
-        guard let first = tokens.first, first.uppercased().hasPrefix("TRANSLA") else { return false }
-        let rest = tokens.dropFirst().joined(separator: " ")
-        return rest.count <= 3 || rest.allSatisfy { $0.isNumber || $0.isWhitespace }
+        let compact = s.uppercased().filter { $0.isLetter }
+        return compact.hasPrefix("TRANSL")
     }
 
     private nonisolated static func stripEchoedOriginalPrefix(from translated: String, original: String) -> String? {

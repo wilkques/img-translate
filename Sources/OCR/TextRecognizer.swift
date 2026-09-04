@@ -63,6 +63,14 @@ enum TextRecognizer {
             // 同時要確認沒有把 `YA BASTA`/`ERES RUIDOSO` 這類原本讀對的正常對話拖累。
             request.usesLanguageCorrection = false
             request.recognitionLanguages = recognitionLanguages
+            // ⚠️ 2026-09-04:指定最新 revision 後 U/L 誤讀(`MUGYEOM` 讀成
+            // `MLGYEOM`)依然沒有改善。這是對照 Safari 差異最後一個成本一樣低
+            // 的變因:我們原本限定西班牙文+英文,Safari 的即時文字辨識很可能
+            // 是自動偵測語言、不限定。`automaticallyDetectsLanguage = true`
+            // 讓 Vision 自己判斷語言,不受 `recognitionLanguages` 限制——如果
+            // 這樣還是沒改善,代表這是 Vision 框架對這個字體 U/L 筆畫辨識的
+            // 真實極限,不用再往「調 Vision 設定」這個方向投入。
+            request.automaticallyDetectsLanguage = true
             // 濾掉太小的雜訊框(例如漫畫畫面裡的細小線條被誤判成文字),
             // 混合式架構下每個框都要多跑一次 VLM 推理,少一個雜訊框就少一次呼叫。
             request.minimumTextHeight = 0.01
