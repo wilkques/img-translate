@@ -1378,4 +1378,65 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         }
         return results
     }
+
+    // MARK: - 詞庫候選分類
+
+    /// 2026-09-07:`TranslationRequestCoordinator.looksLikeProperNoun` 那個
+    /// 純字串啟發式(字數 1-4、不含對話語氣標點)只能篩掉明顯不是候選的
+    /// 對話句,篩不出「這句話具體算不算人名/地名/無法翻譯的專有物品名」——
+    /// 這需要語意判斷,字串規則做不到。這裡補上第二階段:只對已經通過
+    /// 第一階段啟發式的候選才呼叫(避免每個翻譯區塊都多打一次模型),問
+    /// 模型一個範圍明確的是非題。
+    ///
+    /// 跟 `extractGlossaryCandidates`/`transliterateNameList` 同一類:**全新、
+    /// 獨立的 prompt**,不碰 `makeTextOnlyPrompt`/`makePrompt` 這幾份已裝機
+    /// 驗證很多輪的核心翻譯 prompt。判斷錯的代價很低——候選佇列多一筆或
+    /// 少一筆,使用者在詞庫畫面仍要勾選確認才會真的寫進 `GlossaryStore`,
+    /// 不是自動寫入風險。
+    private let glossaryClassificationGenerateParameters = GenerateParameters(
+        maxTokens: 8,
+        temperature: 0.0
+    )
+
+    func classifyGlossaryCandidate(
+        original: String, translated: String, mangaOrigin: String
+    ) async throws -> Bool {
+        let container = try await ensureLoaded()
+        let prompt = Self.makeGlossaryClassificationPrompt(
+            original: original, translated: translated, mangaOrigin: mangaOrigin)
+        let userInput = UserInput(chat: [.user(prompt, images: [])])
+        let lmInput = try await container.prepare(input: userInput)
+        let stream = try await container.generate(
+            input: lmInput, parameters: glossaryClassificationGenerateParameters)
+
+        var raw = ""
+        for await event in stream {
+            if let chunk = event.chunk { raw += chunk }
+        }
+        return raw.trimmingCharacters(in: .whitespacesAndNewlines).uppercased().hasPrefix("YES")
+    }
+
+    private static func makeGlossaryClassificationPrompt(
+        original: String, translated: String, mangaOrigin: String
+    ) -> String {
+        """
+        You are reviewing one short line from a comic translation to decide if \
+        it belongs in a glossary of proper nouns that must stay consistent \
+        every time they appear.
+
+        Original text: \(original)
+        Current translation: \(translated)
+
+        Answer YES only if this text is ONE of:
+        - a person's name
+        - a place name
+        - a special or invented item, organisation, or title name that has no \
+          natural translation
+
+        Answer NO if it is an ordinary sentence, question, exclamation, sound \
+        effect, or common phrase — even if short.
+
+        Reply with exactly one word: YES or NO. Nothing else.
+        """
+    }
 }

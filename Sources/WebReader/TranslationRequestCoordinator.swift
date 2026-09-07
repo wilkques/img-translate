@@ -61,13 +61,21 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
     /// 取代模型推理**,錯誤的自動猜測一旦沒經過確認就寫進去,會在使用者
     /// 完全沒注意到的情況下,把之後所有同名對白都蓋成錯的。
     ///
-    /// 判斷「像不像一個名字」是純本地端的字串啟發式(見 `looksLikeProperNoun`),
-    /// **刻意不額外呼叫模型判斷**——這個純文字模式的 prompt 已經裝機驗證
-    /// 十幾輪,這個專案吃過太多次「為了新功能動到共用 prompt,結果把原本
-    /// 翻對的句子拖垮」的虧(見 `notes/2026-08-28.md`/`2026-09-01.md`),這裡
-    /// 完全不碰 `makeTextOnlyPrompt`/`translateText` 的呼叫方式。啟發式不
-    /// 保證準(這個站的對白也全部是大寫,無法單靠大小寫分辨),但候選清單
-    /// 本來就是要使用者勾選確認,抓過頭沒有實質代價,使用者不勾就是了。
+    /// 判斷「該不該進候選佇列」分兩階段:
+    /// 1. `looksLikeProperNoun`——純本地端字串啟發式,零成本,先篩掉明顯
+    ///    不可能的對話句(問句/驚嘆句/太長的句子)
+    /// 2. `VLMTranslationEngine.classifyGlossaryCandidate`——2026-09-07 新增,
+    ///    只對通過第一階段的候選才呼叫模型,問一個範圍明確的是非題:
+    ///    這句話算不算人名、地名、或無法直接翻譯的專有物品名。字串規則
+    ///    分不出「字數短的句子」跟「真的是名字」,需要語意判斷才行,但
+    ///    只對窄篩過的少數候選呼叫,不會拖累每個翻譯區塊的速度。
+    ///
+    /// 兩階段都刻意**不碰** `makeTextOnlyPrompt`/`translateText` 的核心翻譯
+    /// 呼叫——分類用的是全新、獨立的 prompt(`makeGlossaryClassificationPrompt`),
+    /// 這個專案吃過太多次「為了新功能動到共用 prompt,結果把原本翻對的句子
+    /// 拖垮」的虧(見 `notes/2026-08-28.md`/`2026-09-01.md`)。分類判斷錯的
+    /// 代價很低——候選清單多一筆或少一筆,使用者在詞庫畫面仍要勾選確認
+    /// 才會真的寫進 `GlossaryStore`,不是自動寫入風險。
     struct NameCandidate: Identifiable {
         let id = UUID()
         let original: String
@@ -75,12 +83,12 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
     }
     @Published private(set) var nameCandidates: [NameCandidate] = []
 
-    /// 名字/地名的啟發式判斷,只看原文(OCR/LiveText 的 `bestText`),跟
-    /// 譯文品質無關:
-    /// 1. 含有 `¿¡?!…` 這類對話語氣標點就排除——單獨的人名/地名不會帶問句、
-    ///    驚嘆句、刪節號
-    /// 2. 字數落在 1-4 個(空白分隔的 token)——人名/地名通常是 1-4 個詞,
-    ///    一般對白句子多半更長
+    /// 第一階段的啟發式,只看原文(OCR/LiveText 的 `bestText`),跟譯文
+    /// 品質無關:
+    /// 1. 含有 `¿¡?!…` 這類對話語氣標點就排除——單獨的人名/地名/物品名
+    ///    不會帶問句、驚嘆句、刪節號
+    /// 2. 字數落在 1-4 個(空白分隔的 token)——人名/地名/物品名通常是
+    ///    1-4 個詞,一般對白句子多半更長
     /// 3. 總長度不超過 30 字元、至少含一個字母(排除純標點/數字雜訊)
     static func looksLikeProperNoun(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -583,15 +591,21 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
                     rawOutput: result.rawOutput, ocrAlternates: alternatesText, liveText: region.liveText ?? ""))
                 guard translated != VLMTranslationEngine.failureMessage else { continue }
 
-                // 2026-09-07:翻成功、看起來像人名/地名、詞庫裡還沒有 →
-                // 排進候選佇列(見 `nameCandidates` 說明,不直接寫入)。
-                // `glossary.lookup` 已經在上面攔截過一次,這裡不會重複判斷
-                // 命中詞庫的情況;只需要另外擋掉「這輪已經排過同一個候選」
-                // (同一頁常常同一個名字出現在好幾個對話框)。
+                // 2026-09-07:翻成功、詞庫裡還沒有 → 先過第一階段字串啟發式,
+                // 再過第二階段模型分類(人名/地名/無法翻譯的專有物品名),
+                // 兩階段都過才排進候選佇列(見 `nameCandidates` 說明,不直接
+                // 寫入)。`glossary.lookup` 已經在上面攔截過一次,這裡不會
+                // 重複判斷命中詞庫的情況;還要擋掉「這輪已經排過同一個候選」
+                // (同一頁常常同一個名字出現在好幾個對話框)——這個去重檢查
+                // 刻意放在呼叫模型分類**之前**,已經在佇列裡的候選不用重複
+                // 分類,省一次推理。
                 if Self.looksLikeProperNoun(region.bestText),
                    glossary.lookup(region.bestText) == nil {
                     let key = GlossaryStore.normalize(region.bestText)
-                    if !nameCandidates.contains(where: { GlossaryStore.normalize($0.original) == key }) {
+                    if !nameCandidates.contains(where: { GlossaryStore.normalize($0.original) == key }),
+                       let isCandidate = try? await vlmEngine.classifyGlossaryCandidate(
+                           original: region.bestText, translated: translated, mangaOrigin: mangaOrigin),
+                       isCandidate {
                         nameCandidates.append(
                             NameCandidate(original: region.bestText, translated: translated))
                     }
