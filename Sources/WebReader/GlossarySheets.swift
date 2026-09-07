@@ -132,7 +132,7 @@ struct GlossaryListSheet: View {
                     glossary.remove(atOffsets: offsets)
                 }
             }
-            .navigationTitle("人名詞庫")
+            .navigationTitle("詞庫")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
