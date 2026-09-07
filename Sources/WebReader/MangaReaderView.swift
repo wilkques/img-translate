@@ -173,7 +173,13 @@ struct MangaReaderView: View {
                 // `modelPicker` 已經五個控制項,誤觸容易按到「移除」
                 // (刪 2.2GB 模型)或「關閉模型」。標籤上的數字本身就是
                 // 「重開 App 後有沒有正確從磁碟載入」的截圖證據。
-                Button("詞庫(\(glossary.entries.count))") { activeSheet = .list }
+                // 2026-09-07:數字加上待確認候選——只顯示總數不分開,詳細
+                // 拆解(幾筆已收錄/幾筆待確認)在詞庫畫面裡看,這裡只是入口。
+                Button(
+                    coordinator.nameCandidates.isEmpty
+                        ? "詞庫(\(glossary.entries.count))"
+                        : "詞庫(\(glossary.entries.count)+\(coordinator.nameCandidates.count) 待確認)"
+                ) { activeSheet = .list }
                     .font(.caption2)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -189,7 +195,8 @@ struct MangaReaderView: View {
                     glossary: glossary)
             case .list:
                 GlossaryListSheet(
-                    glossary: glossary, sourceLanguageCode: coordinator.sourceLanguage,
+                    glossary: glossary, coordinator: coordinator,
+                    sourceLanguageCode: coordinator.sourceLanguage,
                     mangaOrigin: coordinator.mangaOrigin, vlmEngine: vlmEngine,
                     fetchPageTitle: { await coordinator.fetchPageTitle() })
             }

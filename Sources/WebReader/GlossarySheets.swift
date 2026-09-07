@@ -55,12 +55,16 @@ struct GlossaryPinSheet: View {
 /// case 容易有轉場的邊角問題,疊一層自己管理比較單純)。
 struct GlossaryListSheet: View {
     @ObservedObject var glossary: GlossaryStore
+    /// 2026-09-07:「翻譯中發現的人名/地名」候選佇列的來源——見
+    /// `TranslationRequestCoordinator.nameCandidates` 的說明。
+    @ObservedObject var coordinator: TranslationRequestCoordinator
     let sourceLanguageCode: String
     let mangaOrigin: String
     let vlmEngine: VLMTranslationEngine
     let fetchPageTitle: () async -> String
     @Environment(\.dismiss) private var dismiss
     @State private var showSearchSheet = false
+    @State private var showAddSheet = false
     @State private var prefilledSeriesTitle = ""
     /// 點列進來編輯——跟 `GlossaryPinSheet`(從除錯清單釘選,原文唯讀)
     /// 不同,這裡原文也能改,見 `GlossaryStore.update` 的說明。
@@ -73,6 +77,38 @@ struct GlossaryListSheet: View {
                     Text(error)
                         .font(.caption)
                         .foregroundStyle(.red)
+                }
+                // 2026-09-07:翻譯過程中用啟發式抓到的候選,使用者要逐筆
+                // 「加入」或「略過」才會真的動到詞庫本體——`GlossaryStore.upsert`
+                // 寫入的東西會完全取代模型推理,啟發式抓錯不能無聲寫進去。
+                if !coordinator.nameCandidates.isEmpty {
+                    Section("翻譯中發現的人名/地名,確認後加入(\(coordinator.nameCandidates.count))") {
+                        ForEach(coordinator.nameCandidates) { candidate in
+                            HStack(spacing: 8) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(candidate.original)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    Text(candidate.translated)
+                                }
+                                Spacer()
+                                Button("加入") {
+                                    glossary.upsert(
+                                        original: candidate.original, translated: candidate.translated)
+                                    coordinator.removeNameCandidate(id: candidate.id)
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
+                                Button {
+                                    coordinator.removeNameCandidate(id: candidate.id)
+                                } label: {
+                                    Image(systemName: "xmark")
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            }
+                        }
+                    }
                 }
                 if glossary.entries.isEmpty {
                     Text("還沒有釘選任何譯名")
@@ -103,6 +139,9 @@ struct GlossaryListSheet: View {
                     Button("完成") { dismiss() }
                 }
                 ToolbarItem(placement: .primaryAction) {
+                    Button("新增") { showAddSheet = true }
+                }
+                ToolbarItem(placement: .primaryAction) {
                     Button("自動查找") {
                         Task {
                             prefilledSeriesTitle = await fetchPageTitle()
@@ -111,6 +150,9 @@ struct GlossaryListSheet: View {
                     }
                 }
             }
+        }
+        .sheet(isPresented: $showAddSheet) {
+            GlossaryAddEntrySheet(glossary: glossary)
         }
         .sheet(isPresented: $showSearchSheet) {
             GlossarySearchSheet(
@@ -158,6 +200,51 @@ struct GlossaryEditSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("儲存") {
                         glossary.update(id: entryID, original: original, translated: translated)
+                        dismiss()
+                    }
+                    .disabled(!canSave)
+                }
+            }
+        }
+    }
+}
+
+/// 2026-09-07:手動新增一筆全新詞庫條目——原文、譯文都是空白起手,兩邊
+/// 都能打字。跟 `GlossaryPinSheet`(從除錯清單釘選,原文鎖死跟 OCR 一致)
+/// 不同,這裡是使用者自己想先幫還沒出現過的名字定調,不需要先等它被
+/// 偵測到。用 `upsert` 而不是 `update`——沒有既有 `id` 可以定位,語意上
+/// 就是「新增或覆蓋同 key 的條目」,跟 `GlossaryPinSheet` 用同一個寫入
+/// 路徑。
+struct GlossaryAddEntrySheet: View {
+    @ObservedObject var glossary: GlossaryStore
+    @State private var original = ""
+    @State private var translated = ""
+    @Environment(\.dismiss) private var dismiss
+
+    private var canSave: Bool {
+        !original.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !translated.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("原文") {
+                    TextField("原文", text: $original)
+                }
+                Section("譯文") {
+                    TextField("譯文", text: $translated)
+                }
+            }
+            .navigationTitle("新增詞庫條目")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("儲存") {
+                        glossary.upsert(original: original, translated: translated)
                         dismiss()
                     }
                     .disabled(!canSave)

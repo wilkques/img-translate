@@ -55,6 +55,51 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
         var blocks: [BlockDebug] = []
     }
 
+    /// 2026-09-07:「翻譯出來的人名地名自動塞進詞庫」——Cyril 選了「先列候選,
+    /// 確認再加入」(見對話紀錄),不是直接寫入。理由跟既有的自動查找功能
+    /// (`GlossarySearchSheet`)同一個:`GlossaryStore` 命中的條目會**完全
+    /// 取代模型推理**,錯誤的自動猜測一旦沒經過確認就寫進去,會在使用者
+    /// 完全沒注意到的情況下,把之後所有同名對白都蓋成錯的。
+    ///
+    /// 判斷「像不像一個名字」是純本地端的字串啟發式(見 `looksLikeProperNoun`),
+    /// **刻意不額外呼叫模型判斷**——這個純文字模式的 prompt 已經裝機驗證
+    /// 十幾輪,這個專案吃過太多次「為了新功能動到共用 prompt,結果把原本
+    /// 翻對的句子拖垮」的虧(見 `notes/2026-08-28.md`/`2026-09-01.md`),這裡
+    /// 完全不碰 `makeTextOnlyPrompt`/`translateText` 的呼叫方式。啟發式不
+    /// 保證準(這個站的對白也全部是大寫,無法單靠大小寫分辨),但候選清單
+    /// 本來就是要使用者勾選確認,抓過頭沒有實質代價,使用者不勾就是了。
+    struct NameCandidate: Identifiable {
+        let id = UUID()
+        let original: String
+        let translated: String
+    }
+    @Published private(set) var nameCandidates: [NameCandidate] = []
+
+    /// 名字/地名的啟發式判斷,只看原文(OCR/LiveText 的 `bestText`),跟
+    /// 譯文品質無關:
+    /// 1. 含有 `¿¡?!…` 這類對話語氣標點就排除——單獨的人名/地名不會帶問句、
+    ///    驚嘆句、刪節號
+    /// 2. 字數落在 1-4 個(空白分隔的 token)——人名/地名通常是 1-4 個詞,
+    ///    一般對白句子多半更長
+    /// 3. 總長度不超過 30 字元、至少含一個字母(排除純標點/數字雜訊)
+    static func looksLikeProperNoun(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= 30 else { return false }
+        guard trimmed.rangeOfCharacter(from: .letters) != nil else { return false }
+        let dialoguePunctuation = CharacterSet(charactersIn: "¿¡?!…")
+        guard trimmed.rangeOfCharacter(from: dialoguePunctuation) == nil else { return false }
+        let wordCount = trimmed.split(separator: " ").count
+        guard (1...4).contains(wordCount) else { return false }
+        return true
+    }
+
+    /// 使用者在詞庫畫面確認加入或略過後呼叫——真正寫入由 `GlossaryStore.upsert`
+    /// 負責(呼叫端自己做),這裡只管把已經處理過的候選從佇列移除,兩種
+    /// 操作(採用/略過)結果相同,不需要分開兩個函式。
+    func removeNameCandidate(id: UUID) {
+        nameCandidates.removeAll { $0.id == id }
+    }
+
     @Published private(set) var probes: [ImageProbe] = []
     @Published private(set) var pageStatus = "尚未載入"
     @Published var sourceLanguage = "es"
@@ -537,6 +582,21 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
                     source: translated == VLMTranslationEngine.failureMessage ? "純文字,失敗" : "純文字",
                     rawOutput: result.rawOutput, ocrAlternates: alternatesText, liveText: region.liveText ?? ""))
                 guard translated != VLMTranslationEngine.failureMessage else { continue }
+
+                // 2026-09-07:翻成功、看起來像人名/地名、詞庫裡還沒有 →
+                // 排進候選佇列(見 `nameCandidates` 說明,不直接寫入)。
+                // `glossary.lookup` 已經在上面攔截過一次,這裡不會重複判斷
+                // 命中詞庫的情況;只需要另外擋掉「這輪已經排過同一個候選」
+                // (同一頁常常同一個名字出現在好幾個對話框)。
+                if Self.looksLikeProperNoun(region.bestText),
+                   glossary.lookup(region.bestText) == nil {
+                    let key = GlossaryStore.normalize(region.bestText)
+                    if !nameCandidates.contains(where: { GlossaryStore.normalize($0.original) == key }) {
+                        nameCandidates.append(
+                            NameCandidate(original: region.bestText, translated: translated))
+                    }
+                }
+
                 // 只有真的翻成功才存進上下文——失敗訊息本身不是有效的譯文,
                 // 存進去只會誤導後面的呼叫。
                 recentTextTranslations.append((original: region.bestText, translated: translated))
