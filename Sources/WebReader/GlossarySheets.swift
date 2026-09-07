@@ -64,11 +64,13 @@ struct GlossaryListSheet: View {
     let fetchPageTitle: () async -> String
     @Environment(\.dismiss) private var dismiss
     @State private var showSearchSheet = false
-    @State private var showAddSheet = false
+    @State private var showAddWhitelistSheet = false
+    @State private var showAddBlacklistSheet = false
     @State private var prefilledSeriesTitle = ""
     /// 點列進來編輯——跟 `GlossaryPinSheet`(從除錯清單釘選,原文唯讀)
     /// 不同,這裡原文也能改,見 `GlossaryStore.update` 的說明。
     @State private var editingEntry: GlossaryEntry?
+    @State private var editingBlacklistEntry: BlacklistEntry?
 
     var body: some View {
         NavigationStack {
@@ -78,63 +80,100 @@ struct GlossaryListSheet: View {
                         .font(.caption)
                         .foregroundStyle(.red)
                 }
-                // 2026-09-07:翻譯過程中用啟發式抓到的候選,使用者要逐筆
-                // 「加入」或「略過」才會真的動到詞庫本體——`GlossaryStore.upsert`
-                // 寫入的東西會完全取代模型推理,啟發式抓錯不能無聲寫進去。
+                // 2026-09-07:翻譯過程中用啟發式+模型分類抓到的候選,使用者
+                // 要逐筆決定「加入白名單(給正確譯名)」「加入黑名單(不
+                // 翻譯)」或「略過」才會真的動到詞庫本體——`GlossaryStore`
+                // 的兩張表命中都會完全取代模型推理,自動判斷抓錯不能無聲
+                // 寫進去。
                 if !coordinator.nameCandidates.isEmpty {
                     Section("翻譯中發現的人名/地名,確認後加入(\(coordinator.nameCandidates.count))") {
                         ForEach(coordinator.nameCandidates) { candidate in
-                            HStack(spacing: 8) {
+                            VStack(alignment: .leading, spacing: 6) {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(candidate.original)
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                     Text(candidate.translated)
                                 }
-                                Spacer()
-                                Button("加入") {
-                                    glossary.upsert(
-                                        original: candidate.original, translated: candidate.translated)
-                                    coordinator.removeNameCandidate(id: candidate.id)
+                                HStack(spacing: 8) {
+                                    Button("加入白名單") {
+                                        glossary.upsert(
+                                            original: candidate.original, translated: candidate.translated)
+                                        coordinator.removeNameCandidate(id: candidate.id)
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .controlSize(.small)
+                                    Button("加入黑名單") {
+                                        glossary.addToBlacklist(candidate.original)
+                                        coordinator.removeNameCandidate(id: candidate.id)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                    Spacer()
+                                    Button {
+                                        coordinator.removeNameCandidate(id: candidate.id)
+                                    } label: {
+                                        Image(systemName: "xmark")
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
                                 }
-                                .buttonStyle(.borderedProminent)
-                                .controlSize(.small)
-                                Button {
-                                    coordinator.removeNameCandidate(id: candidate.id)
-                                } label: {
-                                    Image(systemName: "xmark")
-                                }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
                             }
                         }
                     }
                 }
-                if glossary.entries.isEmpty {
-                    Text("還沒有釘選任何譯名")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                ForEach(glossary.entries) { entry in
-                    Button {
-                        editingEntry = entry
-                    } label: {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(entry.original)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Text(entry.translated)
-                        }
-                        // 原本沒設寬度,Button 的點擊熱區只有文字本身那麼寬——
-                        // 撐滿整列寬度 + `contentShape` 明確宣告熱區形狀,右側
-                        // 空白處也點得到,不用精準點在字上。
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
+
+                // 2026-09-07:「白名單」= 原本的詞庫條目(原文 → 指定譯名),
+                // 跟下面的「黑名單」(不翻譯)並列分開兩個 Section,標籤跟
+                // Cyril 溝通用的詞一致,不要自己發明另一套命名。
+                Section("白名單(指定譯名,\(glossary.entries.count))") {
+                    if glossary.entries.isEmpty {
+                        Text("還沒有任何條目")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
-                    .buttonStyle(.plain)
+                    ForEach(glossary.entries) { entry in
+                        Button {
+                            editingEntry = entry
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(entry.original)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Text(entry.translated)
+                            }
+                            // 原本沒設寬度,Button 的點擊熱區只有文字本身那麼寬——
+                            // 撐滿整列寬度 + `contentShape` 明確宣告熱區形狀,右側
+                            // 空白處也點得到,不用精準點在字上。
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .onDelete { offsets in
+                        glossary.remove(atOffsets: offsets)
+                    }
                 }
-                .onDelete { offsets in
-                    glossary.remove(atOffsets: offsets)
+
+                Section("黑名單(不翻譯,\(glossary.blacklist.count))") {
+                    if glossary.blacklist.isEmpty {
+                        Text("還沒有任何條目")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(glossary.blacklist) { entry in
+                        Button {
+                            editingBlacklistEntry = entry
+                        } label: {
+                            Text(entry.original)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .onDelete { offsets in
+                        glossary.removeFromBlacklist(atOffsets: offsets)
+                    }
                 }
             }
             .navigationTitle("詞庫")
@@ -144,7 +183,10 @@ struct GlossaryListSheet: View {
                     Button("完成") { dismiss() }
                 }
                 ToolbarItem(placement: .primaryAction) {
-                    Button("新增") { showAddSheet = true }
+                    Menu("新增") {
+                        Button("新增白名單條目") { showAddWhitelistSheet = true }
+                        Button("新增黑名單條目") { showAddBlacklistSheet = true }
+                    }
                 }
                 ToolbarItem(placement: .primaryAction) {
                     Button("自動查找") {
@@ -156,8 +198,11 @@ struct GlossaryListSheet: View {
                 }
             }
         }
-        .sheet(isPresented: $showAddSheet) {
+        .sheet(isPresented: $showAddWhitelistSheet) {
             GlossaryAddEntrySheet(glossary: glossary)
+        }
+        .sheet(isPresented: $showAddBlacklistSheet) {
+            GlossaryAddBlacklistEntrySheet(glossary: glossary)
         }
         .sheet(isPresented: $showSearchSheet) {
             GlossarySearchSheet(
@@ -166,6 +211,9 @@ struct GlossaryListSheet: View {
         }
         .sheet(item: $editingEntry) { entry in
             GlossaryEditSheet(entryID: entry.id, original: entry.original, translated: entry.translated, glossary: glossary)
+        }
+        .sheet(item: $editingBlacklistEntry) { entry in
+            GlossaryBlacklistEditSheet(entryID: entry.id, original: entry.original, glossary: glossary)
         }
     }
 }
@@ -241,7 +289,7 @@ struct GlossaryAddEntrySheet: View {
                     TextField("譯文", text: $translated)
                 }
             }
-            .navigationTitle("新增詞庫條目")
+            .navigationTitle("新增白名單條目")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -250,6 +298,85 @@ struct GlossaryAddEntrySheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("儲存") {
                         glossary.upsert(original: original, translated: translated)
+                        dismiss()
+                    }
+                    .disabled(!canSave)
+                }
+            }
+        }
+    }
+}
+
+/// 2026-09-07:手動新增一筆黑名單條目——只有原文,沒有譯文欄位,因為
+/// 語意就是「這段文字不要翻譯」,見 `BlacklistEntry` 的說明。
+struct GlossaryAddBlacklistEntrySheet: View {
+    @ObservedObject var glossary: GlossaryStore
+    @State private var original = ""
+    @Environment(\.dismiss) private var dismiss
+
+    private var canSave: Bool {
+        !original.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("原文(不翻譯,原樣保留)") {
+                    TextField("原文", text: $original)
+                }
+            }
+            .navigationTitle("新增黑名單條目")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("儲存") {
+                        glossary.addToBlacklist(original)
+                        dismiss()
+                    }
+                    .disabled(!canSave)
+                }
+            }
+        }
+    }
+}
+
+/// 2026-09-07:編輯一筆既有黑名單條目——只能改原文拼法(對齊「自動抓的
+/// 拼法跟這個站實際 OCR 拼法對不上」這種情況,理由跟 `GlossaryEditSheet`
+/// 一樣),沒有譯文可改。
+struct GlossaryBlacklistEditSheet: View {
+    let entryID: UUID
+    @State var original: String
+    @ObservedObject var glossary: GlossaryStore
+    @Environment(\.dismiss) private var dismiss
+
+    private var canSave: Bool {
+        !original.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("原文(不翻譯,原樣保留)") {
+                    TextField("原文", text: $original)
+                }
+            }
+            .navigationTitle("編輯黑名單")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("儲存") {
+                        // 黑名單沒有「用 id 定位再改原文」的 update 函式——
+                        // 用同一個 id 的舊條目先刪、新原文重新加,效果等價
+                        // 且不用替 `GlossaryStore` 多開一個只有這裡用得到的
+                        // API。使用者感受不到差異(還是同一個操作:改字、存檔)。
+                        glossary.removeFromBlacklist(id: entryID)
+                        glossary.addToBlacklist(original)
                         dismiss()
                     }
                     .disabled(!canSave)

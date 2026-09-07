@@ -13,11 +13,38 @@ struct GlossaryEntry: Codable, Identifiable {
     var createdAt: Date
 }
 
-/// 檔案格式的版本信封。現在用不到,但加一個 `version` 欄位的成本是零,
-/// 之後真的要改格式時才有辦法分辨舊檔。
+/// 2026-09-07:黑名單條目——「這段原文就是不要翻譯,原樣保留」,跟
+/// `GlossaryEntry` 不同的地方是沒有 `translated` 欄位,因為根本不需要
+/// 譯文。存在的理由:網站浮水印(`ZONAOLYMPUS.COM` 這類)、刻意保留原文
+/// 的專有物品名,這類文字被模型翻譯反而是幫倒忙(見 `notes/2026-09-03.md`
+/// 「浮水印文字被模型腦補成一整句話」那個案例)——與其每次都靠翻譯品質
+/// 賭運氣,不如直接跳過翻譯這一步。
+struct BlacklistEntry: Codable, Identifiable {
+    let id: UUID
+    var original: String
+    var createdAt: Date
+}
+
+/// 檔案格式的版本信封。`blacklist` 是 2026-09-07 補上的新欄位——舊檔案
+/// 沒有這個 key,自訂 `init(from:)` 用 `decodeIfPresent` 給預設空陣列,
+/// 不會讓舊使用者的 `glossary.json` 一升級就讀取失敗。
 private struct GlossaryFile: Codable {
     var version: Int
     var entries: [GlossaryEntry]
+    var blacklist: [BlacklistEntry]
+
+    init(version: Int, entries: [GlossaryEntry], blacklist: [BlacklistEntry]) {
+        self.version = version
+        self.entries = entries
+        self.blacklist = blacklist
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decode(Int.self, forKey: .version)
+        entries = try container.decode([GlossaryEntry].self, forKey: .entries)
+        blacklist = try container.decodeIfPresent([BlacklistEntry].self, forKey: .blacklist) ?? []
+    }
 }
 
 /// 人名詞庫:使用者釘選一次正確譯名之後,之後每次遇到同一段原文都直接沿用,
@@ -57,6 +84,14 @@ final class GlossaryStore: ObservableObject {
     /// 每次載入與異動後由 `rebuildIndex()` 重算。
     private var index: [String: String] = [:]
 
+    /// 2026-09-07:黑名單清單,新的在前,直接驅動 UI。
+    @Published private(set) var blacklist: [BlacklistEntry] = []
+
+    /// `normalize(original)` 的集合。衍生資料,不寫進檔案,每次載入與
+    /// 異動後由 `rebuildBlacklistIndex()` 重算——跟 `index` 分開兩個查表
+    /// 結構,語意不同(一個是「translated 值」,一個純粹是「有沒有在裡面」)。
+    private var blacklistIndex: Set<String> = []
+
     private static let currentVersion = 1
 
     init() {
@@ -70,6 +105,15 @@ final class GlossaryStore: ObservableObject {
         let key = Self.normalize(text)
         guard !key.isEmpty else { return nil }
         return index[key]
+    }
+
+    /// 翻譯前的另一個攔截點,跟 `lookup` 平行、但語意相反——命中代表
+    /// 「這段原文不要翻譯,原樣保留」,呼叫端要完全跳過模型呼叫,見
+    /// `TranslationRequestCoordinator.runTranslation` 的整合。
+    func isBlacklisted(_ text: String) -> Bool {
+        let key = Self.normalize(text)
+        guard !key.isEmpty else { return false }
+        return blacklistIndex.contains(key)
     }
 
     // MARK: - 異動
@@ -125,6 +169,32 @@ final class GlossaryStore: ObservableObject {
         save()
     }
 
+    // MARK: - 黑名單異動
+
+    /// 加進黑名單。跟 `upsert` 一樣同 key 只留一筆(把舊的移到最前面,
+    /// 不留重複項)——黑名單只有「有沒有」這個布林狀態,沒有「覆蓋」的
+    /// 概念,重複加只是把時間戳記更新、排到清單最前面。
+    func addToBlacklist(_ original: String) {
+        let key = Self.normalize(original)
+        guard !key.isEmpty else { return }
+        blacklist.removeAll { Self.normalize($0.original) == key }
+        blacklist.insert(BlacklistEntry(id: UUID(), original: original, createdAt: Date()), at: 0)
+        rebuildBlacklistIndex()
+        save()
+    }
+
+    func removeFromBlacklist(id: UUID) {
+        blacklist.removeAll { $0.id == id }
+        rebuildBlacklistIndex()
+        save()
+    }
+
+    func removeFromBlacklist(atOffsets offsets: IndexSet) {
+        blacklist.remove(atOffsets: offsets)
+        rebuildBlacklistIndex()
+        save()
+    }
+
     // MARK: - 正規化
 
     /// 釘選時與查詢時套用同一套規則,兩邊必須完全一致,不然會產生
@@ -171,6 +241,16 @@ final class GlossaryStore: ObservableObject {
         index = next
     }
 
+    private func rebuildBlacklistIndex() {
+        var next: Set<String> = []
+        for entry in blacklist {
+            let key = Self.normalize(entry.original)
+            guard !key.isEmpty else { continue }
+            next.insert(key)
+        }
+        blacklistIndex = next
+    }
+
     // MARK: - 持久化
 
     static var directoryURL: URL {
@@ -194,7 +274,9 @@ final class GlossaryStore: ObservableObject {
             let data = try Data(contentsOf: url)
             let decoded = try JSONDecoder().decode(GlossaryFile.self, from: data)
             entries = decoded.entries
+            blacklist = decoded.blacklist
             rebuildIndex()
+            rebuildBlacklistIndex()
         } catch {
             lastError = "詞庫讀取失敗:\(error.localizedDescription)"
         }
@@ -219,7 +301,7 @@ final class GlossaryStore: ObservableObject {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             let data = try encoder.encode(
-                GlossaryFile(version: Self.currentVersion, entries: entries))
+                GlossaryFile(version: Self.currentVersion, entries: entries, blacklist: blacklist))
             try data.write(to: Self.fileURL, options: .atomic)
             lastError = nil
         } catch {

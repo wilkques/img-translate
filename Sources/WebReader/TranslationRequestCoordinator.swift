@@ -543,6 +543,20 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
             for region in regions {
                 let alternatesText = region.visionAlternates.joined(separator: " / ")
 
+                // ⚠️ 2026-09-07:黑名單攔截,順序放在詞庫**之前**——這段
+                // 原文如果同時出現在黑名單跟詞庫(理論上使用者不該這樣做,
+                // 但不假設使用者不會犯錯),「不翻譯」比「翻成某個值」更
+                // 保守安全,優先權給黑名單。命中就直接顯示原文,連上下文
+                // 通道都不存(它本來就不是「原文→譯文」配對,存進去對後續
+                // 句子的翻譯沒有幫助,徒增雜訊)。
+                if glossary.isBlacklisted(region.bestText) {
+                    blockDebugs.append(BlockDebug(
+                        visionText: region.visionText, recognizedText: region.bestText,
+                        translatedText: region.bestText, source: "純文字,黑名單(不翻譯)",
+                        ocrAlternates: alternatesText, liveText: region.liveText ?? ""))
+                    continue
+                }
+
                 // ⚠️ 2026-09-04:人名詞庫攔截,必須在呼叫模型**之前**做——
                 // 見 `GlossaryStore` 說明,詞庫要有強制力,不能只是丟進下面
                 // 的建議性 `context` 通道讓模型自己決定要不要理。命中就直接
