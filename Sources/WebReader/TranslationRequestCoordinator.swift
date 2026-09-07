@@ -547,17 +547,30 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
                 var loIndex = startIndex
                 var hiIndex = startIndex
                 var combinedScore = bestScore
+                // 2026-09-07 追加:裝機發現貪婪擴展偶爾會多併進**不相干的
+                // 相鄰區塊**(例如把下一句對白的開頭「Tú...」也吸進來)
+                // ——雙字元 bigram Dice 分數短字串時本來就不穩定,多併一兩
+                // 個字偶爾恰好也讓分數微幅上升。加一個長度護欄:擴展後的
+                // 折疊字串長度不能超過 `visionText` 折疊長度的 1.4 倍,
+                // 正常的「多行同一段話」擴展長度應該落在跟 `visionText`
+                // 差不多的量級,不會差這麼多——真正需要救的截斷案例(缺一整
+                // 段開頭)擴展後長度本來就該非常接近 100%,不會撞到這個護欄。
+                let maxFoldedLength = Int(Double(foldedVision.count) * 1.4)
 
                 while hiIndex + 1 < liveLines.count, !usedLiveLineIndices.contains(hiIndex + 1) {
                     let candidate = (loIndex...(hiIndex + 1)).map { liveLines[$0] }.joined(separator: " ")
-                    let score = PageOutputParser.similarity(foldedVision, PageOutputParser.fold(candidate))
+                    let foldedCandidate = PageOutputParser.fold(candidate)
+                    guard foldedCandidate.count <= maxFoldedLength else { break }
+                    let score = PageOutputParser.similarity(foldedVision, foldedCandidate)
                     guard score > combinedScore else { break }
                     hiIndex += 1
                     combinedScore = score
                 }
                 while loIndex > 0, !usedLiveLineIndices.contains(loIndex - 1) {
                     let candidate = ((loIndex - 1)...hiIndex).map { liveLines[$0] }.joined(separator: " ")
-                    let score = PageOutputParser.similarity(foldedVision, PageOutputParser.fold(candidate))
+                    let foldedCandidate = PageOutputParser.fold(candidate)
+                    guard foldedCandidate.count <= maxFoldedLength else { break }
+                    let score = PageOutputParser.similarity(foldedVision, foldedCandidate)
                     guard score > combinedScore else { break }
                     loIndex -= 1
                     combinedScore = score
