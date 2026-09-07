@@ -17,10 +17,21 @@ import SwiftUI
 /// 推到 LiveContainer 側載環境約 6GB 的上限(`reason: per-process-limit`)。
 /// 試過換小模型(`Qwen3-VL-2B`/`Qwen2.5-VL-3B`)解決 OOM,也試過保留 `4B`
 /// 但每張圖處理完整個卸載模型——後者裝機直接 SIGABRT(卸載動作跟 Metal
-/// 非同步完成回呼搶時序,是比 OOM 更難排查的當機),已收回。最終定案:
+/// 非同步完成回呼搶時序,是比 OOM 更難排查的當機),已收回。當時定案:
 /// 固定用 `Qwen2.5-VL-3B`,搭配放寬過的 retry prompt(見
 /// `VLMTranslationEngine.makeRetryPrompt`),翻譯品質堪用且沒有額外當機
-/// 風險。模型選單保留,想手動試別的模型可以自己切,但預設不追求 `4B`。
+/// 風險。
+///
+/// ⚠️ 2026-09-07:改回預設 `Qwen3-VL-4B`。重新檢視上面那次事故——當時
+/// 出事的組合是「4B + 每張圖處理完整個卸載模型」,不是單純「用 4B」。
+/// 那次卸載機制是為了在讀圖路線(`translateRegion`/`translatePage`,
+/// 要跑視覺 tower,GPU 記憶體壓力重很多)硬把記憶體歸零而加的實驗性
+/// 做法,純文字模式(`useTextOnlyTranslation`)完全不呼叫讀圖路線、也
+/// 沒有這個卸載機制,不會踩到同一個 Metal 競態。Cyril 這幾天在純文字
+/// 模式手動選用 4B 測試了不少頁,沒有出現 OOM 或閃退,是實測證據支持
+/// 「舊風險評估已經過時」。裝機驗證仍要留意連續處理多張圖的記憶體
+/// 累積情況(尤其如果之後又切回讀圖模式),模型選單保留,想換小模型
+/// 隨時可以自己切。
 struct MangaReaderView: View {
     @StateObject private var vlmEngine: VLMTranslationEngine
     @StateObject private var coordinator: TranslationRequestCoordinator
@@ -74,13 +85,11 @@ struct MangaReaderView: View {
     ]
 
     init() {
-        // 2026-09-02:曾經試過「每張圖處理完整個卸載模型」換回 4B 的品質,
-        // 裝機直接 SIGABRT——卸載動作跟 Metal 命令佇列的非同步完成回呼搶時序,
-        // 引入了新的當機(比原本的 OOM 更難排查),已經整個收回。改用固定
-        // 選 `Qwen2.5-VL-3B`:retry prompt 放寬後翻譯品質已經算堪用,且不會
-        // 動到模型容器生命週期這塊、沒有額外的當機風險。
+        // 2026-09-07:不再覆寫成 `Qwen2.5-VL-3B`,讓 `VLMTranslationEngine`
+        // 用自己的預設值(`.qwen3VL4B`)——見上面檔頭 2026-09-07 那段的
+        // 完整說明:當初 SIGABRT 事故的組合是「4B + 每張圖卸載模型」,純
+        // 文字模式沒有卸載機制、不呼叫讀圖路線,不是同一種風險。
         let engine = VLMTranslationEngine()
-        engine.selectedModel = .qwen2_5VL3B
         _vlmEngine = StateObject(wrappedValue: engine)
         let store = GlossaryStore()
         _glossary = StateObject(wrappedValue: store)

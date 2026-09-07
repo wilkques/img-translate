@@ -285,6 +285,16 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     /// 譯文顯示。這種「看起來是譯文字串,其實混進不該有的內容」的狀況不容易
     /// 只靠解析後的結果診斷,呼叫端需要原始輸出才能在除錯清單裡對照,不然
     /// 每次都是在沒有證據的情況下猜 prompt/生成參數要怎麼調。
+    /// ⚠️ 2026-09-07:裝機抓到極短句(`...¿YO?` 這種資訊量很少的輸入)
+    /// 3 次同樣的 prompt/參數重試全部卡進「輸出異常重複」判定,完全沒翻出
+    /// 東西——同溫度/同 prompt 重試對這顆模型是已經驗證過的無效手段(讀圖
+    /// 路線 `notes/2026-08-28.md` 那一輪就是同一個結論)。加第 4 次
+    /// 「最後手段」:前 3 次都失敗才觸發,換成 `makeTextOnlyRetryPrompt`
+    /// (全新、刻意精簡、跟 `makeTextOnlyPrompt` 完全分開的 prompt),仿照
+    /// 讀圖路線 `makeRetryPrompt` 之於 `makePrompt` 的既有手法。溫度/
+    /// `maxTokens` 不變——同一輪教訓是「拉高溫度重試反而更容易卡迴圈」,
+    /// 這裡只變動 prompt 這一個變數。這是文字模式第一次嘗試這個套路,
+    /// 不保證有效,裝機驗證前先當實驗性質。
     func translateText(
         _ text: String, from source: String, to target: String,
         context: [(original: String, translated: String)] = [],
@@ -302,6 +312,9 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
                 mangaOrigin: mangaOrigin)
             if lastResult.translated != Self.failureMessage { return lastResult }
         }
+        lastResult = try await translateTextOnce(
+            text, from: source, to: target, context: context, ocrAlternates: ocrAlternates,
+            mangaOrigin: mangaOrigin, useSimplifiedPrompt: true)
         return lastResult
     }
 
@@ -309,14 +322,17 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         _ text: String, from source: String, to target: String,
         context: [(original: String, translated: String)],
         ocrAlternates: [String],
-        mangaOrigin: String
+        mangaOrigin: String,
+        useSimplifiedPrompt: Bool = false
     ) async throws -> (translated: String, rawOutput: String) {
         let sourceName = try LanguageNames.name(for: source)
         let targetName = try LanguageNames.name(for: target)
         let container = try await ensureLoaded()
-        let prompt = Self.makeTextOnlyPrompt(
-            source: sourceName, target: targetName, text: text, context: context,
-            ocrAlternates: ocrAlternates, mangaOrigin: mangaOrigin)
+        let prompt = useSimplifiedPrompt
+            ? Self.makeTextOnlyRetryPrompt(source: sourceName, target: targetName, text: text)
+            : Self.makeTextOnlyPrompt(
+                source: sourceName, target: targetName, text: text, context: context,
+                ocrAlternates: ocrAlternates, mangaOrigin: mangaOrigin)
 
         let userInput = UserInput(chat: [.user(prompt, images: [])])
         let lmInput = try await container.prepare(input: userInput)
@@ -561,7 +577,9 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         transliterate the sound into \(target) instead of translating a literal meaning, \
         keeping any repeated sound short (2-4 repeats is enough). If the original has an \
         ellipsis "...", keep it as "..." in your translation instead of changing it to a \
-        colon or other punctuation.\(originHint)
+        colon or other punctuation. Avoid awkwardly repeating the same word or phrase twice \
+        within a single sentence when a natural paraphrase exists — write it the way a fluent \
+        native speaker would actually say it.\(originHint)
 
         Text: \(text)\(alternatesLine)
 
@@ -570,6 +588,24 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         text before or after your answer. For example, if the text was "HOLA" and the target \
         language was Chinese, the correct whole reply is:
         你好
+        """
+    }
+
+    /// 2026-09-07:`translateText` 前 3 次同樣的 prompt/參數都卡進「輸出
+    /// 異常重複」才會呼叫這份 prompt(見 `translateText` 的說明)——刻意
+    /// **完全獨立**,不共用 `makeTextOnlyPrompt` 的任何規則子句(狀聲詞
+    /// 音譯、刪節號、重複用詞……全部拿掉),只留最低限度指示。仿照讀圖
+    /// 路線 `makeRetryPrompt` 之於 `makePrompt` 的既有手法:卡迴圈的難字
+    /// 往往是因為主要 prompt 的指令量對這顆模型太重,精簡到極限反而更有
+    /// 機會生出一句正常輸出,即使犧牲掉狀聲詞音譯這類細膩規則也值得——
+    /// 有翻出東西比完全翻不出來好。
+    private static func makeTextOnlyRetryPrompt(source: String, target: String, text: String) -> String {
+        """
+        This is one very short line of dialogue from a comic, in \(source). Give a natural \
+        \(target) translation. Reply with only the \(target) translation, a single line, \
+        nothing else.
+
+        Text: \(text)
         """
     }
 
