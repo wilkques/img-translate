@@ -117,15 +117,28 @@ struct MangaReaderView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 Spacer()
-                // 2026-09-03:Cyril 要求「開始翻譯」要明確觸發,不要一偵測到
-                // 圖片就自動下載+排隊翻譯——見 `TranslationRequestCoordinator.
-                // isAutoTranslateEnabled` 的說明。這顆按鈕只負責「邊捲邊翻」
-                // 那條路線,跟下面「翻譯整話」是兩個獨立的開始方式。
-                Button(coordinator.isAutoTranslateEnabled ? "翻譯中" : "開始翻譯") {
-                    coordinator.startAutoTranslate()
+                // 2026-09-07:「開始翻譯」跟「暫停/繼續」原本是兩顆各自獨立
+                // 的按鈕,但兩者其實是同一件事的三個狀態(還沒開始/執行中/
+                // 已暫停),分開放使用者要在兩顆按鈕之間找,合併成一顆
+                // 三態按鈕:還沒開始顯示「開始翻譯」,按下去觸發
+                // `startAutoTranslate()`(「邊捲邊翻」那條路線,見
+                // `isAutoTranslateEnabled` 的說明);開始之後這顆按鈕接手
+                // 暫停/繼續(`pauseTranslation`/`resumeTranslation`,一樣只
+                // 擋佇列啟動下一個工作,不中斷正在跑的那一個)。
+                // 「翻譯整話」是另一種獨立的啟動方式(整話翻完才給看,見
+                // `startPreTranslateAll` 的說明),刻意不併進來——那是不同
+                // 的翻譯策略,不是同一個開關的另一個狀態。
+                Button(startPauseButtonLabel) {
+                    if !coordinator.isAutoTranslateEnabled {
+                        coordinator.startAutoTranslate()
+                    } else if coordinator.isPaused {
+                        coordinator.resumeTranslation()
+                    } else {
+                        coordinator.pauseTranslation()
+                    }
                 }
                 .font(.caption2)
-                .disabled(coordinator.isAutoTranslateEnabled || loadedURL == nil)
+                .disabled(loadedURL == nil)
 
                 // 2026-09-03:Cyril 確認「追求品質」——邊捲邊翻永遠追不上
                 // VLM 速度,改成這顆按鈕觸發「整話全部翻完才給看」,見
@@ -135,21 +148,6 @@ struct MangaReaderView: View {
                 }
                 .font(.caption2)
                 .disabled(coordinator.isPreTranslating || loadedURL == nil)
-
-                // 2026-09-03:Cyril 要求可以暫停/繼續——只擋佇列啟動下一個
-                // 工作,不中斷正在跑的那一個,見 `TranslationRequestCoordinator.
-                // pauseTranslation`/`resumeTranslation` 的說明。兩種開始翻譯
-                // 的方式(開始翻譯/翻譯整話)都會打開 `isAutoTranslateEnabled`,
-                // 用同一個開關判斷這顆按鈕該不該顯示可按。
-                Button(coordinator.isPaused ? "繼續" : "暫停") {
-                    if coordinator.isPaused {
-                        coordinator.resumeTranslation()
-                    } else {
-                        coordinator.pauseTranslation()
-                    }
-                }
-                .font(.caption2)
-                .disabled(!coordinator.isAutoTranslateEnabled)
             }
 
             ZStack {
@@ -389,6 +387,13 @@ struct MangaReaderView: View {
         case .detected, .downloading, .translating: return false
         case .translated, .noTextFound, .failed: return true
         }
+    }
+
+    /// 2026-09-07:「開始翻譯/暫停/繼續」合併成一顆按鈕後的顯示文字,
+    /// 三態對應三個獨立狀態,見按鈕本身呼叫端的說明。
+    private var startPauseButtonLabel: String {
+        guard coordinator.isAutoTranslateEnabled else { return "開始翻譯" }
+        return coordinator.isPaused ? "繼續" : "暫停"
     }
 
     private func loadURL() {
