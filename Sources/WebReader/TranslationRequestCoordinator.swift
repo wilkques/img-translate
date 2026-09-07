@@ -547,37 +547,25 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
                 var loIndex = startIndex
                 var hiIndex = startIndex
                 var combinedScore = bestScore
-                // 2026-09-07 追加:裝機發現貪婪擴展偶爾會多併進**不相干的
-                // 相鄰區塊**(例如把下一句對白的開頭「Tú...」也吸進來)
-                // ——雙字元 bigram Dice 分數短字串時本來就不穩定,多併一兩
-                // 個字偶爾恰好也讓分數微幅上升。加一個長度護欄:擴展後的
-                // 折疊字串長度不能超過 `visionText` 折疊長度的 1.4 倍,
-                // 正常的「多行同一段話」擴展長度應該落在跟 `visionText`
-                // 差不多的量級,不會差這麼多——真正需要救的截斷案例(缺一整
-                // 段開頭)擴展後長度本來就該非常接近 100%,不會撞到這個護欄。
-                let maxFoldedLength = Int(Double(foldedVision.count) * 1.4)
 
                 while hiIndex + 1 < liveLines.count, !usedLiveLineIndices.contains(hiIndex + 1) {
                     let candidate = (loIndex...(hiIndex + 1)).map { liveLines[$0] }.joined(separator: " ")
-                    let foldedCandidate = PageOutputParser.fold(candidate)
-                    guard foldedCandidate.count <= maxFoldedLength else { break }
-                    let score = PageOutputParser.similarity(foldedVision, foldedCandidate)
+                    let score = PageOutputParser.similarity(foldedVision, PageOutputParser.fold(candidate))
                     guard score > combinedScore else { break }
                     hiIndex += 1
                     combinedScore = score
                 }
                 while loIndex > 0, !usedLiveLineIndices.contains(loIndex - 1) {
                     let candidate = ((loIndex - 1)...hiIndex).map { liveLines[$0] }.joined(separator: " ")
-                    let foldedCandidate = PageOutputParser.fold(candidate)
-                    guard foldedCandidate.count <= maxFoldedLength else { break }
-                    let score = PageOutputParser.similarity(foldedVision, foldedCandidate)
+                    let score = PageOutputParser.similarity(foldedVision, PageOutputParser.fold(candidate))
                     guard score > combinedScore else { break }
                     loIndex -= 1
                     combinedScore = score
                 }
 
                 for k in loIndex...hiIndex { usedLiveLineIndices.insert(k) }
-                regions[i].liveText = (loIndex...hiIndex).map { liveLines[$0] }.joined(separator: " ")
+                let combined = (loIndex...hiIndex).map { liveLines[$0] }.joined(separator: " ")
+                regions[i].liveText = Self.trimUnmatchedEdges(combined, foldedTarget: foldedVision)
             }
         }
 
@@ -820,6 +808,47 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
         case "zh-Hant-TW": return "zh-Hant"
         default: return code
         }
+    }
+
+    /// 2026-09-07:裝機發現配對到的 `liveLines` 內容本身(單行或擴展組合
+    /// 之後)可能已經比對應的 `visionText` 多——`ImageAnalyzer` 的
+    /// `transcript` 分行不受我們的 Vision bbox 控制,常常把「下一個對話框
+    /// 開頭的幾個字」也黏在同一個 transcript 行裡(裝機案例:visionText 是
+    /// 「ENCARGARME DE LOS TIPOS DE LA CLASE DE NEGOCIOS.」,配到的
+    /// liveLines 卻是「...NEGOCIOS. Tú...」,多出的「Tú...」其實屬於畫面上
+    /// 另一個獨立的對話框)。這不是「擴展迴圈併錯」——起點的單行最佳匹配
+    /// 本身就已經帶著多餘內容,加長度護欄擋不住(短字串折疊後可能只增加
+    /// 一兩個字元,長度比例看不出異常)。
+    ///
+    /// 改成直接在最終文字上做「頭尾各自試著修剪一個詞,只要修剪後相似度
+    /// 不會變差就修」——因為多餘內容对 `visionText` 沒有貢獻,folded 之後
+    /// 只會稀釋 Dice 分數的分母,修掉它分數只會持平或變好,不會犧牲真正
+    /// 相關的內容。跟「往兩邊擴展去救缺內容」的邏輯剛好互補,一個負責補齊
+    /// 缺漏,一個負責修掉多餘。
+    private static func trimUnmatchedEdges(_ text: String, foldedTarget: String) -> String {
+        var words = text.split(separator: " ").map(String.init)
+        guard words.count > 1 else { return text }
+
+        func score(_ ws: [String]) -> Double {
+            PageOutputParser.similarity(foldedTarget, PageOutputParser.fold(ws.joined(separator: " ")))
+        }
+
+        var currentScore = score(words)
+        while words.count > 1 {
+            let trimmed = Array(words.dropLast())
+            let trimmedScore = score(trimmed)
+            guard trimmedScore >= currentScore else { break }
+            words = trimmed
+            currentScore = trimmedScore
+        }
+        while words.count > 1 {
+            let trimmed = Array(words.dropFirst())
+            let trimmedScore = score(trimmed)
+            guard trimmedScore >= currentScore else { break }
+            words = trimmed
+            currentScore = trimmedScore
+        }
+        return words.joined(separator: " ")
     }
 }
 
