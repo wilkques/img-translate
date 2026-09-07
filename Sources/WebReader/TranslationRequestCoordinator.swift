@@ -507,68 +507,6 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
             return
         }
 
-        // ⚠️ 2026-09-04:VisionKit `ImageAnalyzer`(Safari 同款引擎)讀文字內容,
-        // Vision 的 bounding box 繼續負責定位(`ImageAnalyzer` 不提供座標)。
-        // 只在純文字模式跑這一步——讀圖路線送的是裁圖本身,不需要文字內容。
-        // 用既有的 `PageOutputParser.fold`/`similarity`(當初為整頁 VLM 路線
-        // 寫的)把整頁讀到的每一行貪婪配對回 Vision 的區塊,配不到或這個
-        // 功能不可用(`LiveTextRecognizer` 回傳 `nil`)就維持 `liveText`
-        // 是 `nil`,`bestText` 自動退回 `visionText`,不影響既有行為。
-        //
-        // ⚠️ 2026-09-07:裝機抓到單行配對會截斷合併過的多行區塊——
-        // `RegionMerger` 把同一對話框的好幾行 Vision bbox 合成一個區塊
-        // (`visionText` 是「NO ERES DE LA CLSAE DE NEGOCIOS.」),但
-        // `ImageAnalyzer` 的 `transcript` 是照它自己的視覺換行分行,原本
-        // 只取單一相似度最高的那一行(「DE LA CLSAE DE NEGOCIOS.」),開頭
-        // 的「NO ERES」(否定語氣!)整段消失,模型拿到殘缺片段翻出語意
-        // 完全走樣的內容(截圖案例:一句普通否定句被翻成莫名其妙的「這不是
-        // 要你翻譯...而是要你翻譯...」)。
-        //
-        // 修法:以單行最佳匹配為起點,往前後貪婪擴展相鄰、還沒被用過的
-        // `liveLines`,只要接上去能讓「拼起來的文字」跟完整 `visionText`
-        // 的相似度**繼續進步**就繼續併,兩個方向各自併到不再進步為止,
-        // 才把整段(可能橫跨好幾個 `liveLines` 索引)當成這個區塊的
-        // `liveText`。單行本來就完整對到的區塊(絕大多數案例)行為不變——
-        // 往兩邊擴展時,加入不相關的下一行只會讓相似度變差,擴展迴圈第一次
-        // 嘗試就會停下來。
-        if useTextOnlyTranslation, let liveLines = await LiveTextRecognizer.recognizeLinesTiled(in: page),
-           !liveLines.isEmpty {
-            var usedLiveLineIndices = Set<Int>()
-            for i in regions.indices {
-                let foldedVision = PageOutputParser.fold(regions[i].visionText)
-                var bestIndex: Int?
-                var bestScore = 0.0
-                for j in liveLines.indices where !usedLiveLineIndices.contains(j) {
-                    let score = PageOutputParser.similarity(foldedVision, PageOutputParser.fold(liveLines[j]))
-                    if score > bestScore { bestScore = score; bestIndex = j }
-                }
-                guard let startIndex = bestIndex, bestScore >= 0.5 else { continue }
-
-                var loIndex = startIndex
-                var hiIndex = startIndex
-                var combinedScore = bestScore
-
-                while hiIndex + 1 < liveLines.count, !usedLiveLineIndices.contains(hiIndex + 1) {
-                    let candidate = (loIndex...(hiIndex + 1)).map { liveLines[$0] }.joined(separator: " ")
-                    let score = PageOutputParser.similarity(foldedVision, PageOutputParser.fold(candidate))
-                    guard score > combinedScore else { break }
-                    hiIndex += 1
-                    combinedScore = score
-                }
-                while loIndex > 0, !usedLiveLineIndices.contains(loIndex - 1) {
-                    let candidate = ((loIndex - 1)...hiIndex).map { liveLines[$0] }.joined(separator: " ")
-                    let score = PageOutputParser.similarity(foldedVision, PageOutputParser.fold(candidate))
-                    guard score > combinedScore else { break }
-                    loIndex -= 1
-                    combinedScore = score
-                }
-
-                for k in loIndex...hiIndex { usedLiveLineIndices.insert(k) }
-                let combined = (loIndex...hiIndex).map { liveLines[$0] }.joined(separator: " ")
-                regions[i].liveText = Self.trimUnmatchedEdges(combined, foldedTarget: foldedVision)
-            }
-        }
-
         var fractionalBlocks: [[String: Any]] = []
         var blockDebugs: [BlockDebug] = []
 
@@ -580,36 +518,89 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
         if useTextOnlyTranslation {
             for region in regions {
                 let alternatesText = region.visionAlternates.joined(separator: " / ")
+                var region = region
 
-                // ⚠️ 2026-09-07:黑名單攔截,順序放在詞庫**之前**——這段
-                // 原文如果同時出現在黑名單跟詞庫(理論上使用者不該這樣做,
-                // 但不假設使用者不會犯錯),「不翻譯」比「翻成某個值」更
-                // 保守安全,優先權給黑名單。命中就直接顯示原文,連上下文
-                // 通道都不存(它本來就不是「原文→譯文」配對,存進去對後續
-                // 句子的翻譯沒有幫助,徒增雜訊)。
-                if glossary.isBlacklisted(region.bestText) {
+                // ⚠️ 2026-09-07:詞庫黑白名單改成兩段比對(取代整頁
+                // ImageAnalyzer 比對配對的舊架構,見下方裁圖那段的完整
+                // 說明)。第一段先查 Vision 原始文字——免費、不用等裁圖+
+                // 呼叫 ImageAnalyzer,大部分「已經在詞庫裡、Vision 原文就
+                // 對得上」的常見情況在這裡就攔截掉,不用多花一次
+                // ImageAnalyzer 呼叫。黑名單優先於詞庫(「不翻譯」比「翻成
+                // 某個值」更保守安全),命中就直接顯示原文,連上下文通道
+                // 都不存(它本來就不是「原文→譯文」配對,存進去對後續句子
+                // 的翻譯沒有幫助,徒增雜訊)。
+                if glossary.isBlacklisted(region.visionText) {
                     blockDebugs.append(BlockDebug(
-                        visionText: region.visionText, recognizedText: region.bestText,
-                        translatedText: region.bestText, source: "純文字,黑名單(不翻譯)",
-                        ocrAlternates: alternatesText, liveText: region.liveText ?? ""))
+                        visionText: region.visionText, recognizedText: region.visionText,
+                        translatedText: region.visionText, source: "純文字,黑名單(Vision 原文)",
+                        ocrAlternates: alternatesText))
+                    continue
+                }
+                if let pinned = glossary.lookup(region.visionText) {
+                    blockDebugs.append(BlockDebug(
+                        visionText: region.visionText, recognizedText: region.visionText,
+                        translatedText: pinned, source: "純文字,詞庫(Vision 原文)",
+                        ocrAlternates: alternatesText))
+                    recentTextTranslations.append((original: region.visionText, translated: pinned))
+                    if recentTextTranslations.count > Self.maxContextLines {
+                        recentTextTranslations.removeFirst()
+                    }
+                    fractionalBlocks.append(
+                        Self.fractionalPayload(
+                            pixelRect: region.pixelRect, text: pinned,
+                            pixelWidth: pixelWidth, pixelHeight: pixelHeight))
                     continue
                 }
 
-                // ⚠️ 2026-09-04:人名詞庫攔截,必須在呼叫模型**之前**做——
-                // 見 `GlossaryStore` 說明,詞庫要有強制力,不能只是丟進下面
-                // 的建議性 `context` 通道讓模型自己決定要不要理。命中就直接
-                // 用釘選值、完全不跑推理(順帶比較快),`rawOutput` 刻意留空
-                // (根本沒有模型輸出),除錯清單看到「來源:純文字,詞庫」加上
-                // 沒有「原始輸出」那行,就是這條路徑生效的證據。
+                // ⚠️ 2026-09-07(架構改動,取代整頁 ImageAnalyzer 比對配對):
+                // 原本整頁只呼叫一次 `ImageAnalyzer`,拿到的文字行用相似度
+                // 貪婪配對回 Vision 區塊——`ImageAnalyzer` 自己的分行邏輯跟
+                // Vision 的區塊邊界完全無關,兩個對話框離得近時常常被讀成
+                // 同一行,不管怎麼調相似度門檻/修剪規則都只是治標(同一天
+                // 已經連續修過兩輪同類 bug:否定詞「NO ERES」被配對截斷
+                // 消失、隔壁對話框開頭「Tú...」被誤併進來)。
+                //
+                // 改成逐區塊裁圖,個別呼叫 `ImageAnalyzer`——每次只讓它看
+                // 一個對話框的裁圖,結構上就不可能讀到別的區塊,徹底消除
+                // 這整類配對錯誤,不用再猜相似度門檻。裁圖範圍沿用
+                // `RegionCropper.padded` 預設參數,跟這個專案既有三處 VLM
+                // 裁圖呼叫用同一組已裝機驗證過的留白比例(避免裁到墨跡
+                // 本身被切掉,這個理由對 ImageAnalyzer 一樣成立,不是 VLM
+                // 專屬的考量)。多行合併直接用空白 join,套用既有的
+                // `PageOutputParser.isDegenerateLine` 過濾明顯壞掉的行。
+                //
+                // 代價是呼叫次數從「整頁一次」變成「每個區塊一次」,純文字
+                // 模式的翻譯速度預期會變慢——這是跟 Cyril 討論過、確認可以
+                // 接受的取捨。這輪還沒裝機驗證實際慢多少。
+                let cropRect = RegionCropper.padded(
+                    region.pixelRect, pixelWidth: pixelWidth, pixelHeight: pixelHeight)
+                if let crop = RegionCropper.crop(page, toPixelRect: cropRect) {
+                    let cropImage = UIImage(cgImage: crop)
+                    let lines = (await LiveTextRecognizer.recognizeLines(in: cropImage) ?? [])
+                        .filter { !$0.isEmpty && !PageOutputParser.isDegenerateLine($0) }
+                    if !lines.isEmpty {
+                        region.liveText = lines.joined(separator: " ")
+                    }
+                }
+
+                // 第二段比對:裁圖+ImageAnalyzer 呼叫完,用校正後的
+                // `bestText` 再查一次黑白名單——涵蓋「詞庫存的拼法是
+                // ImageAnalyzer 校正後的版本、Vision 原文讀錯」這種情況
+                // (例如 MUGYEOM/MLGYEOM 這類字母誤讀,不管詞庫存哪一種
+                // 拼法都要能命中,這是 Cyril 明確要求的:兩種拼法都要比對
+                // 得到)。
+                if glossary.isBlacklisted(region.bestText) {
+                    blockDebugs.append(BlockDebug(
+                        visionText: region.visionText, recognizedText: region.bestText,
+                        translatedText: region.bestText, source: "純文字,黑名單(裁圖校正後)",
+                        ocrAlternates: alternatesText, liveText: region.liveText ?? ""))
+                    continue
+                }
                 if let pinned = glossary.lookup(region.bestText) {
                     blockDebugs.append(BlockDebug(
                         visionText: region.visionText, recognizedText: region.bestText,
-                        translatedText: pinned, source: "純文字,詞庫",
+                        translatedText: pinned, source: "純文字,詞庫(裁圖校正後)",
                         ocrAlternates: alternatesText, liveText: region.liveText ?? ""))
-                    // 釘選的配對照樣存進上下文——它是真的原文→譯文配對,
-                    // 讓同一頁其他句子有機會透過既有的 `context` 通道保持
-                    // 人名一致(模型會在參考區看到「NA MUGYEOM => 羅茂謙」)。
-                    // 這是附加好處,不是保證;保證來自上面的攔截本身。
                     recentTextTranslations.append((original: region.bestText, translated: pinned))
                     if recentTextTranslations.count > Self.maxContextLines {
                         recentTextTranslations.removeFirst()
@@ -808,47 +799,6 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
         case "zh-Hant-TW": return "zh-Hant"
         default: return code
         }
-    }
-
-    /// 2026-09-07:裝機發現配對到的 `liveLines` 內容本身(單行或擴展組合
-    /// 之後)可能已經比對應的 `visionText` 多——`ImageAnalyzer` 的
-    /// `transcript` 分行不受我們的 Vision bbox 控制,常常把「下一個對話框
-    /// 開頭的幾個字」也黏在同一個 transcript 行裡(裝機案例:visionText 是
-    /// 「ENCARGARME DE LOS TIPOS DE LA CLASE DE NEGOCIOS.」,配到的
-    /// liveLines 卻是「...NEGOCIOS. Tú...」,多出的「Tú...」其實屬於畫面上
-    /// 另一個獨立的對話框)。這不是「擴展迴圈併錯」——起點的單行最佳匹配
-    /// 本身就已經帶著多餘內容,加長度護欄擋不住(短字串折疊後可能只增加
-    /// 一兩個字元,長度比例看不出異常)。
-    ///
-    /// 改成直接在最終文字上做「頭尾各自試著修剪一個詞,只要修剪後相似度
-    /// 不會變差就修」——因為多餘內容对 `visionText` 沒有貢獻,folded 之後
-    /// 只會稀釋 Dice 分數的分母,修掉它分數只會持平或變好,不會犧牲真正
-    /// 相關的內容。跟「往兩邊擴展去救缺內容」的邏輯剛好互補,一個負責補齊
-    /// 缺漏,一個負責修掉多餘。
-    private static func trimUnmatchedEdges(_ text: String, foldedTarget: String) -> String {
-        var words = text.split(separator: " ").map(String.init)
-        guard words.count > 1 else { return text }
-
-        func score(_ ws: [String]) -> Double {
-            PageOutputParser.similarity(foldedTarget, PageOutputParser.fold(ws.joined(separator: " ")))
-        }
-
-        var currentScore = score(words)
-        while words.count > 1 {
-            let trimmed = Array(words.dropLast())
-            let trimmedScore = score(trimmed)
-            guard trimmedScore >= currentScore else { break }
-            words = trimmed
-            currentScore = trimmedScore
-        }
-        while words.count > 1 {
-            let trimmed = Array(words.dropFirst())
-            let trimmedScore = score(trimmed)
-            guard trimmedScore >= currentScore else { break }
-            words = trimmed
-            currentScore = trimmedScore
-        }
-        return words.joined(separator: " ")
     }
 }
 
