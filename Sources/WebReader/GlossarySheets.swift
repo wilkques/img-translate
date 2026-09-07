@@ -71,6 +71,16 @@ struct GlossaryListSheet: View {
     /// 不同,這裡原文也能改,見 `GlossaryStore.update` 的說明。
     @State private var editingEntry: GlossaryEntry?
     @State private var editingBlacklistEntry: BlacklistEntry?
+    /// 2026-09-07:Cyril 要求可以選擇要顯示哪個列表——名單累積多了之後
+    /// 兩個 Section 一直捲不完,加一個切換只顯示其中一邊。候選確認區塊
+    /// 不受這個切換影響,兩邊都要看得到待處理的候選,不能因為切到「黑名單」
+    /// 頁籤就看不到還沒決定「加白名單還是黑名單」的候選。
+    private enum ListKind: String, CaseIterable, Identifiable {
+        case whitelist = "白名單"
+        case blacklist = "黑名單"
+        var id: String { rawValue }
+    }
+    @State private var selectedList: ListKind = .whitelist
 
     var body: some View {
         NavigationStack {
@@ -80,6 +90,13 @@ struct GlossaryListSheet: View {
                         .font(.caption)
                         .foregroundStyle(.red)
                 }
+                Picker("列表", selection: $selectedList) {
+                    ForEach(ListKind.allCases) { kind in
+                        Text(kind.rawValue).tag(kind)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .listRowSeparator(.hidden)
                 // 2026-09-07:翻譯過程中用啟發式+模型分類抓到的候選,使用者
                 // 要逐筆決定「加入白名單(給正確譯名)」「加入黑名單(不
                 // 翻譯)」或「略過」才會真的動到詞庫本體——`GlossaryStore`
@@ -124,55 +141,61 @@ struct GlossaryListSheet: View {
                 }
 
                 // 2026-09-07:「白名單」= 原本的詞庫條目(原文 → 指定譯名),
-                // 跟下面的「黑名單」(不翻譯)並列分開兩個 Section,標籤跟
-                // Cyril 溝通用的詞一致,不要自己發明另一套命名。
-                Section("白名單(指定譯名,\(glossary.entries.count))") {
-                    if glossary.entries.isEmpty {
-                        Text("還沒有任何條目")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    ForEach(glossary.entries) { entry in
-                        Button {
-                            editingEntry = entry
-                        } label: {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(entry.original)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                Text(entry.translated)
-                            }
-                            // 原本沒設寬度,Button 的點擊熱區只有文字本身那麼寬——
-                            // 撐滿整列寬度 + `contentShape` 明確宣告熱區形狀,右側
-                            // 空白處也點得到,不用精準點在字上。
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .contentShape(Rectangle())
+                // 跟下面的「黑名單」(不翻譯)是兩個獨立 Section,標籤跟
+                // Cyril 溝通用的詞一致,不要自己發明另一套命名。用上面的
+                // `selectedList` 切換只顯示其中一個,名單長了不用一直捲過
+                // 另一邊才找得到自己要的那筆。
+                if selectedList == .whitelist {
+                    Section("白名單(指定譯名,\(glossary.entries.count))") {
+                        if glossary.entries.isEmpty {
+                            Text("還沒有任何條目")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
-                        .buttonStyle(.plain)
-                    }
-                    .onDelete { offsets in
-                        glossary.remove(atOffsets: offsets)
+                        ForEach(glossary.entries) { entry in
+                            Button {
+                                editingEntry = entry
+                            } label: {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(entry.original)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    Text(entry.translated)
+                                }
+                                // 原本沒設寬度,Button 的點擊熱區只有文字本身那麼寬——
+                                // 撐滿整列寬度 + `contentShape` 明確宣告熱區形狀,右側
+                                // 空白處也點得到,不用精準點在字上。
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .onDelete { offsets in
+                            glossary.remove(atOffsets: offsets)
+                        }
                     }
                 }
 
-                Section("黑名單(不翻譯,\(glossary.blacklist.count))") {
-                    if glossary.blacklist.isEmpty {
-                        Text("還沒有任何條目")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    ForEach(glossary.blacklist) { entry in
-                        Button {
-                            editingBlacklistEntry = entry
-                        } label: {
-                            Text(entry.original)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .contentShape(Rectangle())
+                if selectedList == .blacklist {
+                    Section("黑名單(不翻譯,\(glossary.blacklist.count))") {
+                        if glossary.blacklist.isEmpty {
+                            Text("還沒有任何條目")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
-                        .buttonStyle(.plain)
-                    }
-                    .onDelete { offsets in
-                        glossary.removeFromBlacklist(atOffsets: offsets)
+                        ForEach(glossary.blacklist) { entry in
+                            Button {
+                                editingBlacklistEntry = entry
+                            } label: {
+                                Text(entry.original)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .onDelete { offsets in
+                            glossary.removeFromBlacklist(atOffsets: offsets)
+                        }
                     }
                 }
             }
