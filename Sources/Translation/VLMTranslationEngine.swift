@@ -439,6 +439,24 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     /// 措辭上明講這個差異(避免模型把拼音當成外國名字重新發明一套音譯)。
     /// 從一開始就套用 v5 學到的教訓(規則只適用於名字本身、附完整範例),
     /// 不用重新踩一次「整句退化」的坑。這輪還沒裝機驗證。
+    ///
+    /// ⚠️ 2026-09-07:裝機抓到「喊叫偵測」規則誤觸發真正的句子。原文是
+    /// `¡¡¡¿QUÉ DEMONIOS ESTÁS HACIENDO AHORA MISMO?!!!`(一句完整問句,
+    /// 只是用很多驚嘆號/倒驚嘆號表示大聲喊出來),模型卻把它當成純喊叫聲
+    /// 處理,卡進「啊啊啊啊啊…」的重複生成迴圈,收斂後顯示成「啊啊啊」
+    /// ——完全丟失了「你到底在幹嘛」這個問句本身的語意。
+    ///
+    /// 根因:原本的措辭「shout or sound effect written with repeated
+    /// letters」把「重複標點(`¡¡¡`/`!!!`)」跟「重複字母(`AAAA`/`GRRR`)」
+    /// 混在一起講,模型看到一堆驚嘆號就觸發喊叫音譯分支,即使原文其實是
+    /// 有意義的完整句子。這跟過去好幾次「規則污染了不相干的行為」是同一個
+    /// 模式(見上面 v5 的教訓)。
+    ///
+    /// 修法:把兩種情況講清楚分開——重複**標點**(不管幾個 `¡`/`!`)是正常
+    /// 句子/問句用來表示大聲講話,要當一般句子正常翻譯、保留驚嘆號;只有
+    /// 重複**字母**且沒有真正單字內容(`AAAAA`、`GRRRRR` 這種)才是純狀聲詞,
+    /// 才需要音譯而不是照語意翻譯。不動其他任何規則(人名/刪節號/格式要求
+    /// 完全不變),只精修這一條的判準。這輪還沒裝機驗證。
     private static func makeTextOnlyPrompt(
         source: String, target: String, text: String,
         context: [(original: String, translated: String)],
@@ -535,11 +553,15 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         \(contextBlock)Translate the following \(source) comic dialogue into \(target). You must always \
         give an actual \(target) translation — never leave the text unchanged or just copy \
         the original as your answer, and never explain or describe what the text says. \
-        It may be an ordinary sentence, or it may be a shout or sound effect written with \
-        repeated letters — if so, transliterate the sound into \(target) instead of \
-        translating its literal meaning, and keep any repeated sound short (2-4 repeats is \
-        enough). If the original has an ellipsis "...", keep it as "..." in your translation \
-        instead of changing it to a colon or other punctuation.\(originHint)
+        It may be an ordinary sentence or question shouted loudly with lots of repeated \
+        punctuation like "¡¡¡...?!!!" — that repeated punctuation just means "said loudly", \
+        so translate it as a normal, meaningful \(target) sentence and keep the exclamation \
+        marks. Only if the text itself is a pure sound effect made of repeated LETTERS with \
+        no real words (like "AAAAA" or "GRRRRR", not an actual sentence) should you \
+        transliterate the sound into \(target) instead of translating a literal meaning, \
+        keeping any repeated sound short (2-4 repeats is enough). If the original has an \
+        ellipsis "...", keep it as "..." in your translation instead of changing it to a \
+        colon or other punctuation.\(originHint)
 
         Text: \(text)\(alternatesLine)
 
