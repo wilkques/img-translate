@@ -475,7 +475,7 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
             // 逾時/丟例外),`[]` 才是「正常跑完、真的沒讀到字」。這裡一定要
             // 記一筆診斷,不管結果是哪一種,不然除錯清單看起來跟舊版
             // 「什麼都沒發生」一樣,分不出診斷有沒有真的執行過。
-            let diagnosticLines = await LiveTextRecognizer.recognizeLines(in: page)
+            let diagnosticLines = await LiveTextRecognizer.recognizeLinesTiled(in: page)
             let diagnosticSource: String
             let diagnosticLiveText: String
             switch diagnosticLines {
@@ -531,7 +531,7 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
         // `liveText`。單行本來就完整對到的區塊(絕大多數案例)行為不變——
         // 往兩邊擴展時,加入不相關的下一行只會讓相似度變差,擴展迴圈第一次
         // 嘗試就會停下來。
-        if useTextOnlyTranslation, let liveLines = await LiveTextRecognizer.recognizeLines(in: page),
+        if useTextOnlyTranslation, let liveLines = await LiveTextRecognizer.recognizeLinesTiled(in: page),
            !liveLines.isEmpty {
             var usedLiveLineIndices = Set<Int>()
             for i in regions.indices {

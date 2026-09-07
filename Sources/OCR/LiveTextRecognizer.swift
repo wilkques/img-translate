@@ -70,4 +70,71 @@ enum LiveTextRecognizer {
             }
         }
     }
+
+    /// 2026-09-07:Cyril 問「ImageAnalyzer OCR 出來的字彙被切斷?」——查證
+    /// 後確認是真的。`TextRecognizer.recognizeTextTiled` 那輪已經證實 Vision
+    /// 對超長直式長圖(裝機案例 720x6668)內部有隱性降採樣上限,整張圖丟
+    /// 進去文字筆畫會被縮到解析度以下;但當時**只切了 Vision 那條路**,
+    /// `LiveTextRecognizer.recognizeLines` 一直是直接吃整張未切的 `page`
+    /// (`TranslationRequestCoordinator` 兩處呼叫點都是),這是 2026-09-07
+    /// 稍早那次修復就記錄下來、故意先擱置的已知限制——沒想到很快就在裝機
+    /// 測試裡現形:同一顆降採樣限制對 `ImageAnalyzer` 應該同樣成立,只是
+    /// 表現方式不同——Vision 是整段完全讀不到(信心值太低直接被丟棄),
+    /// `ImageAnalyzer` 的 `transcript` 是純文字輸出、沒有信心值門檻,所以
+    /// 呈現成「字彙被切斷/認錯」而不是「整段消失」。
+    ///
+    /// 修法:比照 `recognizeTextTiled` 同一套切塊邏輯(同樣的 1600px 門檻、
+    /// 15% 重疊,常數刻意保持一致,不要兩邊各自調出不同的安全值)。跟
+    /// Vision 那份不同的地方:`ImageAnalyzer` 不提供座標,不需要座標換算,
+    /// 每塊的結果只是純文字行,直接串起來即可;重疊區內同一行文字被相鄰
+    /// 兩塊各自完整讀到一次的情況,用**精確字串比對**去重就夠(不像
+    /// `TextRecognizer` 那邊需要位置去重,這裡沒有位置可比)。
+    static func recognizeLinesTiled(
+        in image: UIImage,
+        maxTileHeight: CGFloat = 1600,
+        overlapFraction: CGFloat = 0.15,
+        timeout: TimeInterval = 10
+    ) async -> [String]? {
+        guard ImageAnalyzer.isSupported, let cgImage = image.cgImage else { return nil }
+        let pixelWidth = cgImage.width
+        let pixelHeight = cgImage.height
+
+        guard CGFloat(pixelHeight) > maxTileHeight else {
+            return await recognizeLines(in: image, timeout: timeout)
+        }
+
+        let overlap = maxTileHeight * overlapFraction
+        let stride = maxTileHeight - overlap
+        var tileTops: [CGFloat] = []
+        var top: CGFloat = 0
+        while true {
+            tileTops.append(top)
+            if top + maxTileHeight >= CGFloat(pixelHeight) { break }
+            top += stride
+        }
+
+        var merged: [String] = []
+        var sawAnyTileError = false
+        for tileTop in tileTops {
+            let tileHeight = min(maxTileHeight, CGFloat(pixelHeight) - tileTop)
+            let pixelRect = CGRect(x: 0, y: tileTop, width: CGFloat(pixelWidth), height: tileHeight)
+            guard let tileCG = cgImage.cropping(to: pixelRect) else { continue }
+            let tileImage = UIImage(cgImage: tileCG, scale: image.scale, orientation: .up)
+            guard let tileLines = await recognizeLines(in: tileImage, timeout: timeout) else {
+                sawAnyTileError = true
+                continue
+            }
+            for line in tileLines where !merged.contains(line) {
+                merged.append(line)
+            }
+        }
+
+        // `merged` 是空的,而且至少有一塊真的失敗(逾時/丟例外)——沒有
+        // 任何一塊成功跑完,回傳 nil(異常狀態,見檔頭語意說明),不要假裝
+        // 是「乾淨跑完但沒讀到字」。只要有任何一塊成功(不管其他塊有沒有
+        // 失敗),就回傳目前併到的結果,即使是空陣列也代表「有跑完、只是
+        // 沒讀到」,不算異常。
+        guard !(merged.isEmpty && sawAnyTileError) else { return nil }
+        return merged
+    }
 }
