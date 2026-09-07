@@ -514,7 +514,25 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
         // 寫的)把整頁讀到的每一行貪婪配對回 Vision 的區塊,配不到或這個
         // 功能不可用(`LiveTextRecognizer` 回傳 `nil`)就維持 `liveText`
         // 是 `nil`,`bestText` 自動退回 `visionText`,不影響既有行為。
-        if useTextOnlyTranslation, let liveLines = await LiveTextRecognizer.recognizeLines(in: page) {
+        //
+        // ⚠️ 2026-09-07:裝機抓到單行配對會截斷合併過的多行區塊——
+        // `RegionMerger` 把同一對話框的好幾行 Vision bbox 合成一個區塊
+        // (`visionText` 是「NO ERES DE LA CLSAE DE NEGOCIOS.」),但
+        // `ImageAnalyzer` 的 `transcript` 是照它自己的視覺換行分行,原本
+        // 只取單一相似度最高的那一行(「DE LA CLSAE DE NEGOCIOS.」),開頭
+        // 的「NO ERES」(否定語氣!)整段消失,模型拿到殘缺片段翻出語意
+        // 完全走樣的內容(截圖案例:一句普通否定句被翻成莫名其妙的「這不是
+        // 要你翻譯...而是要你翻譯...」)。
+        //
+        // 修法:以單行最佳匹配為起點,往前後貪婪擴展相鄰、還沒被用過的
+        // `liveLines`,只要接上去能讓「拼起來的文字」跟完整 `visionText`
+        // 的相似度**繼續進步**就繼續併,兩個方向各自併到不再進步為止,
+        // 才把整段(可能橫跨好幾個 `liveLines` 索引)當成這個區塊的
+        // `liveText`。單行本來就完整對到的區塊(絕大多數案例)行為不變——
+        // 往兩邊擴展時,加入不相關的下一行只會讓相似度變差,擴展迴圈第一次
+        // 嘗試就會停下來。
+        if useTextOnlyTranslation, let liveLines = await LiveTextRecognizer.recognizeLines(in: page),
+           !liveLines.isEmpty {
             var usedLiveLineIndices = Set<Int>()
             for i in regions.indices {
                 let foldedVision = PageOutputParser.fold(regions[i].visionText)
@@ -524,10 +542,29 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
                     let score = PageOutputParser.similarity(foldedVision, PageOutputParser.fold(liveLines[j]))
                     if score > bestScore { bestScore = score; bestIndex = j }
                 }
-                if let j = bestIndex, bestScore >= 0.5 {
-                    usedLiveLineIndices.insert(j)
-                    regions[i].liveText = liveLines[j]
+                guard let startIndex = bestIndex, bestScore >= 0.5 else { continue }
+
+                var loIndex = startIndex
+                var hiIndex = startIndex
+                var combinedScore = bestScore
+
+                while hiIndex + 1 < liveLines.count, !usedLiveLineIndices.contains(hiIndex + 1) {
+                    let candidate = (loIndex...(hiIndex + 1)).map { liveLines[$0] }.joined(separator: " ")
+                    let score = PageOutputParser.similarity(foldedVision, PageOutputParser.fold(candidate))
+                    guard score > combinedScore else { break }
+                    hiIndex += 1
+                    combinedScore = score
                 }
+                while loIndex > 0, !usedLiveLineIndices.contains(loIndex - 1) {
+                    let candidate = ((loIndex - 1)...hiIndex).map { liveLines[$0] }.joined(separator: " ")
+                    let score = PageOutputParser.similarity(foldedVision, PageOutputParser.fold(candidate))
+                    guard score > combinedScore else { break }
+                    loIndex -= 1
+                    combinedScore = score
+                }
+
+                for k in loIndex...hiIndex { usedLiveLineIndices.insert(k) }
+                regions[i].liveText = (loIndex...hiIndex).map { liveLines[$0] }.joined(separator: " ")
             }
         }
 
