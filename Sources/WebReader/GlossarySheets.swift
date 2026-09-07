@@ -125,6 +125,11 @@ struct GlossaryListSheet: View {
                                 .foregroundStyle(.secondary)
                             Text(entry.translated)
                         }
+                        // 原本沒設寬度,Button 的點擊熱區只有文字本身那麼寬——
+                        // 撐滿整列寬度 + `contentShape` 明確宣告熱區形狀,右側
+                        // 空白處也點得到,不用精準點在字上。
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                 }
