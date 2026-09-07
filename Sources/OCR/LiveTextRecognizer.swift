@@ -12,6 +12,16 @@ import UIKit
 /// 這裡只負責「讀文字內容」,位置繼續完全依賴 Vision 的 bounding box——
 /// 呼叫端(`TranslationRequestCoordinator`)要自己把這裡回傳的整頁文字行
 /// 用相似度配對回 Vision 的區塊上。
+///
+/// ⚠️ 2026-09-07:回傳值語意——`nil` = 功能不支援/逾時/丟例外(異常狀態);
+/// `[]`(非 nil 空陣列)= 正常跑完但這頁真的沒讀到任何一行文字;非空陣列 =
+/// 讀到的文字行。09-04 首次寫這支時沒有區分「跑完沒結果」跟「跑不動」,
+/// 兩者都回 `nil`——當時唯一呼叫端(純文字模式的整頁配對)兩者都當 no-op
+/// 處理,分不分都不影響行為。09-07 新增的「Vision 完全沒抓到框」診斷需要
+/// 分清楚這兩種情況(這頁真的沒字 vs 這次呼叫本身失敗/逾時),改成不把
+/// 「空結果」跟「錯誤/逾時」混在一起回 `nil`。既有呼叫端是
+/// `if let lines = ... { for l in lines ... }` 這種寫法,`[]` 一樣是
+/// no-op,不影響既有行為。
 enum LiveTextRecognizer {
     /// ⚠️ 這個專案已經踩過 Apple 系統 Translation framework 在 LiveContainer
     /// 側載環境下**靜默卡死、不拋錯也不完成**的坑(見 README「已知風險」)。
@@ -48,7 +58,7 @@ enum LiveTextRecognizer {
                         .split(separator: "\n", omittingEmptySubsequences: true)
                         .map { $0.trimmingCharacters(in: .whitespaces) }
                         .filter { !$0.isEmpty }
-                    resumeOnce(lines.isEmpty ? nil : lines)
+                    resumeOnce(lines)
                 } catch {
                     resumeOnce(nil)
                 }

@@ -412,17 +412,33 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
             //   (b) LiveText 讀得到 → 是 Vision 位置偵測的缺口(文字真的
             //       存在),需要另外討論怎麼在沒有 bounding box 時仍然疊字
             //       (例如整頁當一個區塊處理),不是調 Vision 參數能解的
+            // 2026-09-07:`LiveTextRecognizer.recognizeLines` 回傳語意已改寫
+            // (見該檔案說明)——`nil` 專指「這次呼叫本身異常」(功能不支援/
+            // 逾時/丟例外),`[]` 才是「正常跑完、真的沒讀到字」。這裡一定要
+            // 記一筆診斷,不管結果是哪一種,不然除錯清單看起來跟舊版
+            // 「什麼都沒發生」一樣,分不出診斷有沒有真的執行過。
             let diagnosticLines = await LiveTextRecognizer.recognizeLines(in: page)
-            if let diagnosticLines, !diagnosticLines.isEmpty {
-                updateBlocks(for: url, [
-                    BlockDebug(
-                        visionText: "(無—— Vision 完全沒偵測到任何區塊)",
-                        recognizedText: "",
-                        translatedText: "",
-                        source: "⚠️ LiveText 讀到文字但 Vision 抓不到位置,無法疊字",
-                        liveText: diagnosticLines.joined(separator: " / "))
-                ])
+            let diagnosticSource: String
+            let diagnosticLiveText: String
+            switch diagnosticLines {
+            case nil:
+                diagnosticSource = "⚠️ Vision 沒抓到框,LiveText 診斷本身異常(逾時/不支援/丟例外)"
+                diagnosticLiveText = "(呼叫失敗,詳見上方判讀)"
+            case .some(let lines) where lines.isEmpty:
+                diagnosticSource = "⚠️ Vision、LiveText 兩顆引擎都判斷這頁沒有可辨識文字"
+                diagnosticLiveText = "(空)"
+            case .some(let lines):
+                diagnosticSource = "⚠️ LiveText 讀到文字但 Vision 抓不到位置,無法疊字"
+                diagnosticLiveText = lines.joined(separator: " / ")
             }
+            updateBlocks(for: url, [
+                BlockDebug(
+                    visionText: "(無—— Vision 完全沒偵測到任何區塊)",
+                    recognizedText: "",
+                    translatedText: "",
+                    source: diagnosticSource,
+                    liveText: diagnosticLiveText)
+            ])
             updateStatus(for: url) { $0 = .noTextFound }
             return
         }
