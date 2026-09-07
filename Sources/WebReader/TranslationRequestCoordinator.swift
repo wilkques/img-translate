@@ -366,7 +366,12 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
 
         let recognized: [RecognizedTextBlock]
         do {
-            recognized = try await TextRecognizer.recognizeText(
+            // ⚠️ 2026-09-07:改用 `recognizeTextTiled`(見 `TextRecognizer` 的
+            // 說明)——網頁這條路線餵進來的圖是漫畫網站的真實頁面,常常是
+            // 長條直式長圖(裝機實測案例 720x6668),整張圖丟給 Vision 會
+            // 完全抓不到任何區塊。一般大小的圖(高度沒超過門檻)這個函式會
+            // 直接退回 `recognizeText`,行為不變。
+            recognized = try await TextRecognizer.recognizeTextTiled(
                 in: page,
                 recognitionLanguages: [Self.visionRecognitionLanguage(for: sourceLanguage), "en-US"]
             )

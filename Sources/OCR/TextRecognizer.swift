@@ -83,4 +83,99 @@ enum TextRecognizer {
             }
         }
     }
+
+    /// 2026-09-07:裝機抓到根因——長條漫畫網站(webtoon 直式長圖,實測案例
+    /// 720x6668)整張圖丟給 Vision 時,`recognizeText` 回傳完全空陣列,連
+    /// VisionKit `ImageAnalyzer`(`LiveTextRecognizer`)也讀不到任何一行,
+    /// 但畫面上肉眼清楚可見對話框文字。這個專案從一開始驗證的固定測試圖
+    /// (`Fixtures/sample-es.jpg`)只有 1145px 高,從沒測過這種極端長寬比的
+    /// 輸入——懷疑兩顆框架內部都對輸入圖有隱性的降採樣上限,超長圖被縮得
+    /// 太小,文字筆畫在縮圖後低於可辨識的解析度(沒辦法讀到框架原始碼證實
+    /// 確切門檻,但這個假設可以直接用「切小塊」繞過,不需要先證實才能修)。
+    ///
+    /// 修法:超過門檻高度就切成上下有重疊的長條,每條在**原始解析度**
+    /// (不整張縮放)跑 `recognizeText`,再把每條的結果換算回整頁的正規化
+    /// 座標系。門檻(1600px)刻意抓在跟已驗證過的固定測試圖同一個量級,
+    /// 不是精算出來的安全值。重疊(15%)是為了同一個對話框如果跨在切點
+    /// 上,至少有一條能完整收進去,不會被攔腰切成兩段各自都讀不完整。
+    ///
+    /// 一般大小的圖(高度沒超過門檻)直接呼叫 `recognizeText`,行為跟改動前
+    /// 完全一樣——這是刻意保留的分岔,已經裝機驗證很多輪的正常案例路徑
+    /// 不冒風險。
+    static func recognizeTextTiled(
+        in image: UIImage,
+        recognitionLanguages: [String],
+        maxTileHeight: CGFloat = 1600,
+        overlapFraction: CGFloat = 0.15
+    ) async throws -> [RecognizedTextBlock] {
+        guard let cgImage = image.cgImage else { return [] }
+        let pixelWidth = cgImage.width
+        let pixelHeight = cgImage.height
+
+        guard CGFloat(pixelHeight) > maxTileHeight else {
+            return try await recognizeText(in: image, recognitionLanguages: recognitionLanguages)
+        }
+
+        let overlap = maxTileHeight * overlapFraction
+        let stride = maxTileHeight - overlap
+        var tileTops: [CGFloat] = []
+        var top: CGFloat = 0
+        while true {
+            tileTops.append(top)
+            if top + maxTileHeight >= CGFloat(pixelHeight) { break }
+            top += stride
+        }
+
+        var merged: [RecognizedTextBlock] = []
+        for tileTop in tileTops {
+            let tileHeight = min(maxTileHeight, CGFloat(pixelHeight) - tileTop)
+            let pixelRect = CGRect(x: 0, y: tileTop, width: CGFloat(pixelWidth), height: tileHeight)
+            guard let tileCG = cgImage.cropping(to: pixelRect) else { continue }
+            let tileImage = UIImage(cgImage: tileCG, scale: image.scale, orientation: .up)
+            let tileBlocks = try await recognizeText(in: tileImage, recognitionLanguages: recognitionLanguages)
+
+            for block in tileBlocks {
+                let box = block.normalizedBoundingBox
+                // tile 內的正規化 y(原點左下)→ 整頁像素 → 整頁正規化 y,
+                // 換算方式跟 `RegionCropper.paddedPixelRect` 同一套邏輯
+                // (y 軸翻轉:Vision 由下往上,像素由上往下)。
+                let pageTopPx = tileTop + (1 - box.maxY) * tileHeight
+                let pageBottomPx = tileTop + (1 - box.minY) * tileHeight
+                let newMinY = 1 - (pageBottomPx / CGFloat(pixelHeight))
+                let newMaxY = 1 - (pageTopPx / CGFloat(pixelHeight))
+                let newBox = CGRect(
+                    x: box.minX, y: newMinY,
+                    width: box.width, height: newMaxY - newMinY)
+                merged.append(RecognizedTextBlock(
+                    text: block.text,
+                    normalizedBoundingBox: newBox,
+                    confidence: block.confidence,
+                    alternates: block.alternates))
+            }
+        }
+
+        return dedupOverlapZone(merged, pixelHeight: pixelHeight)
+    }
+
+    /// 重疊區內同一個對話框可能被相鄰兩條各自完整抓到一次,產生內容幾乎
+    /// 一樣、位置幾乎一樣的兩筆——不去重的話會被 `RegionMerger` 當成
+    /// 「撐大後碰撞的兩個框」直接把文字接在一起(`"X X"` 這種重複內容),
+    /// 比對照文字+位置接近程度來去重更省事、也更貼近真正的失敗模式。
+    private static func dedupOverlapZone(
+        _ blocks: [RecognizedTextBlock], pixelHeight: Int
+    ) -> [RecognizedTextBlock] {
+        var kept: [RecognizedTextBlock] = []
+        for block in blocks {
+            let isDuplicate = kept.contains { existing in
+                guard existing.text == block.text else { return false }
+                let dy = abs(existing.normalizedBoundingBox.midY - block.normalizedBoundingBox.midY)
+                    * CGFloat(pixelHeight)
+                return dy < 40
+            }
+            if !isDuplicate {
+                kept.append(block)
+            }
+        }
+        return kept
+    }
 }
