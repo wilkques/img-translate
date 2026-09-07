@@ -103,9 +103,6 @@ struct GlossaryListSheet: View {
                     Button("完成") { dismiss() }
                 }
                 ToolbarItem(placement: .primaryAction) {
-                    EditButton()
-                }
-                ToolbarItem(placement: .primaryAction) {
                     Button("自動查找") {
                         Task {
                             prefilledSeriesTitle = await fetchPageTitle()
