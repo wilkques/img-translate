@@ -431,9 +431,15 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
                 diagnosticSource = "⚠️ LiveText 讀到文字但 Vision 抓不到位置,無法疊字"
                 diagnosticLiveText = lines.joined(separator: " / ")
             }
+            // 2026-09-07:兩顆引擎都讀不到字時,下一個要排除的可能性是
+            // 「下載/解碼到的根本不是看得到內容的那張圖」(例如網站在我們
+            // 抓取當下回傳一張還沒真正就緒的過渡圖、或 webp 解碼只成功一部分)。
+            // 把解碼後的實際像素尺寸印出來——如果這裡的數字明顯不合理
+            // (例如個位數、或遠小於 `alt` 標記的圖片正常大小),就是下載/
+            // 解碼這一層出問題,不是辨識引擎的極限。
             updateBlocks(for: url, [
                 BlockDebug(
-                    visionText: "(無—— Vision 完全沒偵測到任何區塊)",
+                    visionText: "(無—— Vision 完全沒偵測到任何區塊;解碼後像素尺寸 \(pixelWidth)x\(pixelHeight))",
                     recognizedText: "",
                     translatedText: "",
                     source: diagnosticSource,
