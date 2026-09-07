@@ -395,6 +395,34 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
             recognized, pixelWidth: pixelWidth, pixelHeight: pixelHeight,
             heightInflate: 1.5)
         guard !regions.isEmpty else {
+            // ⚠️ 2026-09-07:裝機回報某些頁面明顯有對話框文字,但 Vision
+            // 完全沒抓到任何區塊(`recognized`/`regions` 都是空的)。定位的
+            // 座標完全依賴 Vision 的 bounding box(見 `LiveTextRecognizer`
+            // 檔頭說明),Vision 找不到框,目前架構真的沒有位置可以疊字——
+            // 但「沒位置」不等於「沒文字」,兩者要先分清楚才知道下一步怎麼修。
+            //
+            // 這裡不猜測根因,順手問一次 VisionKit `ImageAnalyzer`(Safari
+            // 「即時文字辨識」同款引擎)整頁有沒有讀到任何文字,把結果記進
+            // 除錯清單:
+            //   (a) LiveText 也讀不到 → 兩顆引擎都判斷這張圖沒有可辨識文字,
+            //       要懷疑的是「這張圖本身解碼後有沒有問題」而不是 Vision
+            //       的偵測門檻(例如比對 Cyril 手動長按這張圖用系統 Live Text
+            //       選字,能不能選到——如果系統長按也選不到,代表連 Safari
+            //       都讀不出來,不是我們的偵測邏輯問題)
+            //   (b) LiveText 讀得到 → 是 Vision 位置偵測的缺口(文字真的
+            //       存在),需要另外討論怎麼在沒有 bounding box 時仍然疊字
+            //       (例如整頁當一個區塊處理),不是調 Vision 參數能解的
+            let diagnosticLines = await LiveTextRecognizer.recognizeLines(in: page)
+            if let diagnosticLines, !diagnosticLines.isEmpty {
+                updateBlocks(for: url, [
+                    BlockDebug(
+                        visionText: "(無—— Vision 完全沒偵測到任何區塊)",
+                        recognizedText: "",
+                        translatedText: "",
+                        source: "⚠️ LiveText 讀到文字但 Vision 抓不到位置,無法疊字",
+                        liveText: diagnosticLines.joined(separator: " / "))
+                ])
+            }
             updateStatus(for: url) { $0 = .noTextFound }
             return
         }
