@@ -285,16 +285,30 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     /// 譯文顯示。這種「看起來是譯文字串,其實混進不該有的內容」的狀況不容易
     /// 只靠解析後的結果診斷,呼叫端需要原始輸出才能在除錯清單裡對照,不然
     /// 每次都是在沒有證據的情況下猜 prompt/生成參數要怎麼調。
-    /// ⚠️ 2026-09-07:裝機抓到極短句(`...¿YO?` 這種資訊量很少的輸入)
-    /// 3 次同樣的 prompt/參數重試全部卡進「輸出異常重複」判定,完全沒翻出
-    /// 東西——同溫度/同 prompt 重試對這顆模型是已經驗證過的無效手段(讀圖
-    /// 路線 `notes/2026-08-28.md` 那一輪就是同一個結論)。加第 4 次
-    /// 「最後手段」:前 3 次都失敗才觸發,換成 `makeTextOnlyRetryPrompt`
-    /// (全新、刻意精簡、跟 `makeTextOnlyPrompt` 完全分開的 prompt),仿照
-    /// 讀圖路線 `makeRetryPrompt` 之於 `makePrompt` 的既有手法。溫度/
-    /// `maxTokens` 不變——同一輪教訓是「拉高溫度重試反而更容易卡迴圈」,
-    /// 這裡只變動 prompt 這一個變數。這是文字模式第一次嘗試這個套路,
-    /// 不保證有效,裝機驗證前先當實驗性質。
+    /// ⚠️ 2026-09-07:裝機抓到極短句(`...¿YO?`、`¿QUÉ DEMONIOS PASÓ`、
+    /// `¿EH? AH...` 這種資訊量很少的輸入)3 次同樣的 prompt/參數重試全部
+    /// 判定失敗——加了第一版「最後手段」:換一份刻意精簡的
+    /// `makeTextOnlyRetryPrompt`,溫度/`maxTokens` 不變。**裝機驗證這版
+    /// 沒有解決**,展開除錯清單的「原始輸出」欄位才看清楚真正的失敗形狀:
+    /// 不是「同一個字元/詞卡迴圈重複」,是模型幾乎什麼都沒吐出來(`"?"`、
+    /// `"...."` 這種純標點、沒有任何字母數字的輸出),觸發的是
+    /// `PageOutputParser.hasUsableContent` 這個檢查(見 `parseTextOnly`),
+    /// 不是重複偵測——`failureMessage` 的字面「輸出異常重複」對這個失敗
+    /// 形狀其實文不對題,只是沿用同一個通用失敗訊息。
+    ///
+    /// 這代表第一版的假設(「prompt 指令量太重逼模型脫軌重複」)診斷錯了
+    /// 一半:精簡 prompt 本身沒錯,但溫度 0.2 接近貪婪解碼,對這種資訊量
+    /// 極少、開頭是倒驚嘆號/問號的短句,模型可能一開始就卡在「不確定要
+    /// 生成什麼」的局部最佳解,直接吐出輸入本身的標點就停手,跟過去
+    /// 「重複字母的狀聲詞卡迴圈」(讀圖路線 `notes/2026-08-28.md`)是不同
+    /// 的失敗形狀,不能套用同一個「溫度不能拉高」的教訓——那個教訓是
+    /// 針對「已經卡進重複迴圈」的情況,這裡是「一開始就不肯生成內容」,
+    /// 拉高溫度打散這種局部最佳解至少是一個沒試過的獨立變數。
+    ///
+    /// 第二版:**只有最後這次「簡化 prompt」重試**額外把溫度從 0.2 拉到
+    /// 0.5(`textOnlyFinalRetryGenerateParameters`),前 3 次主要嘗試維持
+    /// 原本的溫度不變(不影響任何已經穩定的翻譯)。這是這輪唯一改動的
+    /// 變數,裝機驗證前不保證有效。
     func translateText(
         _ text: String, from source: String, to target: String,
         context: [(original: String, translated: String)] = [],
@@ -336,7 +350,9 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
 
         let userInput = UserInput(chat: [.user(prompt, images: [])])
         let lmInput = try await container.prepare(input: userInput)
-        let stream = try await container.generate(input: lmInput, parameters: textOnlyGenerateParameters)
+        let parameters = useSimplifiedPrompt
+            ? textOnlyFinalRetryGenerateParameters : textOnlyGenerateParameters
+        let stream = try await container.generate(input: lmInput, parameters: parameters)
 
         var raw = ""
         for await event in stream {
@@ -351,6 +367,17 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     private let textOnlyGenerateParameters = GenerateParameters(
         maxTokens: 60,
         temperature: 0.2
+    )
+
+    /// 2026-09-07:只用在 `translateText` 的最後一次「簡化 prompt」重試——
+    /// 見 `translateText` 檔頭說明,溫度 0.2 對「模型幾乎不吐內容」這種
+    /// 局部最佳解式的失敗,拉高溫度是還沒試過的獨立變數,跟「已經卡進
+    /// 重複迴圈,拉高溫度反而更容易卡」(`notes/2026-08-28.md`)是不同的
+    /// 失敗形狀,不套用同一個結論。只有這一條退路用,前 3 次主要嘗試跟
+    /// 其他所有呼叫路徑完全不受影響。
+    private let textOnlyFinalRetryGenerateParameters = GenerateParameters(
+        maxTokens: 60,
+        temperature: 0.5
     )
 
     /// ⚠️ 2026-09-03 裝機驗證(第一版 prompt)抓到三個問題:

@@ -562,18 +562,33 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
                 //
                 // 改成逐區塊裁圖,個別呼叫 `ImageAnalyzer`——每次只讓它看
                 // 一個對話框的裁圖,結構上就不可能讀到別的區塊,徹底消除
-                // 這整類配對錯誤,不用再猜相似度門檻。裁圖範圍沿用
-                // `RegionCropper.padded` 預設參數,跟這個專案既有三處 VLM
-                // 裁圖呼叫用同一組已裝機驗證過的留白比例(避免裁到墨跡
-                // 本身被切掉,這個理由對 ImageAnalyzer 一樣成立,不是 VLM
-                // 專屬的考量)。多行合併直接用空白 join,套用既有的
-                // `PageOutputParser.isDegenerateLine` 過濾明顯壞掉的行。
+                // 這整類配對錯誤,不用再猜相似度門檻。多行合併直接用空白
+                // join,套用既有的 `PageOutputParser.isDegenerateLine`
+                // 過濾明顯壞掉的行。
                 //
                 // 代價是呼叫次數從「整頁一次」變成「每個區塊一次」,純文字
                 // 模式的翻譯速度預期會變慢——這是跟 Cyril 討論過、確認可以
                 // 接受的取捨。這輪還沒裝機驗證實際慢多少。
+                //
+                // ⚠️ 2026-09-08:第一版裁圖用 `RegionCropper.padded` 預設值
+                // (橫 8%/縱 20%),裝機抓到副作用——整頁比對配對的舊架構
+                // 其實無意間附帶一層「跟 Vision 讀法比對相似度」的品質保險
+                // (配不到門檻就退回 Vision),逐區塊裁圖沒有這層保險,加上
+                // 裁圖範圍比整頁小很多,某些短句 `ImageAnalyzer` 讀出比
+                // Vision 本身還離譜的內容(案例:Vision 讀「ARE ANTES」,
+                // 裁圖後 `ImageAnalyzer` 讀成「NEE ANTES」,比 Vision 原本
+                // 的誤讀更偏,翻譯直接變成不知所云)。這輪先試最簡單的變數:
+                // 加大留白比例(橫 8%→20%、縱 20%→40%,約兩倍),給
+                // `ImageAnalyzer` 更多周邊上下文——跟 VLM 讀圖路線的既有
+                // 教訓(「裁太緊會讓模型看不到足夠上下文」)同一個道理,只是
+                // 這裡刻意跟 VLM 裁圖的參數分開(不共用 `RegionCropper.padded`
+                // 預設值),避免這個實驗性調整意外影響到其他呼叫端。這輪
+                // 還沒裝機驗證,如果加大留白沒用,下一步要考慮的是幫這個
+                // 呼叫也加一道跟 Vision 讀法的相似度保險,而不是繼續加大
+                // 留白比例。
                 let cropRect = RegionCropper.padded(
-                    region.pixelRect, pixelWidth: pixelWidth, pixelHeight: pixelHeight)
+                    region.pixelRect, pixelWidth: pixelWidth, pixelHeight: pixelHeight,
+                    padFractionX: 0.20, padFractionY: 0.40)
                 if let crop = RegionCropper.crop(page, toPixelRect: cropRect) {
                     let cropImage = UIImage(cgImage: crop)
                     let lines = (await LiveTextRecognizer.recognizeLines(in: cropImage) ?? [])
