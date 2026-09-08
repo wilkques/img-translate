@@ -573,28 +573,38 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
                 // ⚠️ 2026-09-08:第一版裁圖用 `RegionCropper.padded` 預設值
                 // (橫 8%/縱 20%),裝機抓到副作用——整頁比對配對的舊架構
                 // 其實無意間附帶一層「跟 Vision 讀法比對相似度」的品質保險
-                // (配不到門檻就退回 Vision),逐區塊裁圖沒有這層保險,加上
-                // 裁圖範圍比整頁小很多,某些短句 `ImageAnalyzer` 讀出比
-                // Vision 本身還離譜的內容(案例:Vision 讀「ARE ANTES」,
-                // 裁圖後 `ImageAnalyzer` 讀成「NEE ANTES」,比 Vision 原本
-                // 的誤讀更偏,翻譯直接變成不知所云)。這輪先試最簡單的變數:
-                // 加大留白比例(橫 8%→20%、縱 20%→40%,約兩倍),給
-                // `ImageAnalyzer` 更多周邊上下文——跟 VLM 讀圖路線的既有
-                // 教訓(「裁太緊會讓模型看不到足夠上下文」)同一個道理,只是
-                // 這裡刻意跟 VLM 裁圖的參數分開(不共用 `RegionCropper.padded`
-                // 預設值),避免這個實驗性調整意外影響到其他呼叫端。這輪
-                // 還沒裝機驗證,如果加大留白沒用,下一步要考慮的是幫這個
-                // 呼叫也加一道跟 Vision 讀法的相似度保險,而不是繼續加大
-                // 留白比例。
+                // (配不到門檻就退回 Vision),逐區塊裁圖沒有這層保險,某些
+                // 短句 `ImageAnalyzer` 讀出比 Vision 本身還離譜的內容
+                // (案例:Vision 讀「ARE ANTES」,裁圖後讀成「NEE ANTES」)。
+                //
+                // 第一次嘗試:加大留白比例(橫 20%/縱 40%),猜測是裁太緊
+                // 看不到足夠上下文——**裝機驗證是負分**,同一個案例留白
+                // 加大後 `ImageAnalyzer` 讀出「LEE ANTE, ПЛІ」這種混進
+                // 非拉丁字元的更離譜內容,不是「上下文不夠」的問題,擴大
+                // 裁圖範圍反而給它更多空間腦補。已改回 `RegionCropper.padded`
+                // 預設值,不留這個沒有效果的調整。
+                //
+                // 第二次嘗試(這輪):既然「給更多上下文」這個方向被證明
+                // 無效,改成補回舊架構那層被拿掉的保險——`ImageAnalyzer`
+                // 讀到的內容跟 Vision 自己的讀法算一次相似度,太低(門檻
+                // 刻意設低,0.3)就代表兩者讀到完全不同的東西,`ImageAnalyzer`
+                // 這次大概率在腦補,不予採用、退回 Vision 原文。門檻刻意
+                // 設低是為了不要連 `MUGYEOM`/`MLGYEOM` 這種真正的單字母
+                // 校正案例也一起擋掉(這兩者折疊後仍高度相似,遠高於
+                // 0.3)——只擋真正南轅北轍的離譜讀法。這輪還沒裝機驗證。
                 let cropRect = RegionCropper.padded(
-                    region.pixelRect, pixelWidth: pixelWidth, pixelHeight: pixelHeight,
-                    padFractionX: 0.20, padFractionY: 0.40)
+                    region.pixelRect, pixelWidth: pixelWidth, pixelHeight: pixelHeight)
                 if let crop = RegionCropper.crop(page, toPixelRect: cropRect) {
                     let cropImage = UIImage(cgImage: crop)
                     let lines = (await LiveTextRecognizer.recognizeLines(in: cropImage) ?? [])
                         .filter { !$0.isEmpty && !PageOutputParser.isDegenerateLine($0) }
                     if !lines.isEmpty {
-                        region.liveText = lines.joined(separator: " ")
+                        let candidate = lines.joined(separator: " ")
+                        let score = PageOutputParser.similarity(
+                            PageOutputParser.fold(region.visionText), PageOutputParser.fold(candidate))
+                        if score >= 0.3 {
+                            region.liveText = candidate
+                        }
                     }
                 }
 
