@@ -517,7 +517,9 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
         // (見該檔案的說明)。這是為了乾淨對照兩條路線,不要混在一起跑。
         if useTextOnlyTranslation {
             for region in regions {
-                let alternatesText = region.visionAlternates.joined(separator: " / ")
+                // 只給還沒裁圖前的兩段(黑白名單第一段)當除錯顯示用——那時候
+                // 還沒呼叫 `ImageAnalyzer`,不會呼叫模型,不需要完整候選清單。
+                let visionAlternatesText = region.visionAlternates.joined(separator: " / ")
                 var region = region
 
                 // ⚠️ 2026-09-07:詞庫黑白名單改成兩段比對(取代整頁
@@ -533,14 +535,14 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
                     blockDebugs.append(BlockDebug(
                         visionText: region.visionText, recognizedText: region.visionText,
                         translatedText: region.visionText, source: "純文字,黑名單(Vision 原文)",
-                        ocrAlternates: alternatesText))
+                        ocrAlternates: visionAlternatesText))
                     continue
                 }
                 if let pinned = glossary.lookup(region.visionText) {
                     blockDebugs.append(BlockDebug(
                         visionText: region.visionText, recognizedText: region.visionText,
                         translatedText: pinned, source: "純文字,詞庫(Vision 原文)",
-                        ocrAlternates: alternatesText))
+                        ocrAlternates: visionAlternatesText))
                     recentTextTranslations.append((original: region.visionText, translated: pinned))
                     if recentTextTranslations.count > Self.maxContextLines {
                         recentTextTranslations.removeFirst()
@@ -584,14 +586,22 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
                 // 裁圖範圍反而給它更多空間腦補。已改回 `RegionCropper.padded`
                 // 預設值,不留這個沒有效果的調整。
                 //
-                // 第二次嘗試(這輪):既然「給更多上下文」這個方向被證明
-                // 無效,改成補回舊架構那層被拿掉的保險——`ImageAnalyzer`
-                // 讀到的內容跟 Vision 自己的讀法算一次相似度,太低(門檻
-                // 刻意設低,0.3)就代表兩者讀到完全不同的東西,`ImageAnalyzer`
-                // 這次大概率在腦補,不予採用、退回 Vision 原文。門檻刻意
-                // 設低是為了不要連 `MUGYEOM`/`MLGYEOM` 這種真正的單字母
-                // 校正案例也一起擋掉(這兩者折疊後仍高度相似,遠高於
-                // 0.3)——只擋真正南轅北轍的離譜讀法。這輪還沒裝機驗證。
+                // 第二次嘗試:跟 Vision 讀法算一次相似度,低於 0.3 才退回
+                // Vision——**裝機驗證沒攔到**,`ARE ANTES` 跟 `NEE ANTES`
+                // 共用整個「ANTES」字尾,折疊後 Dice 分數遠高於 0.3;而
+                // 提高門檻又會連 `MLGYEOM`→`MUGYEOM` 這種真正該採用的單
+                // 字母校正一起擋掉(這兩者折疊後相似度落在同一區間)。字元
+                // 相似度對「開頭一個字讀錯、其餘共用」這種錯誤天生不敏感,
+                // 這條路線已證實走不通,程式碼已移除。
+                //
+                // 第三次嘗試(這輪):不再二選一,兩個讀法都給模型——
+                // `bestText` 照舊當主要文字送進去(`ImageAnalyzer` 平均而言
+                // 還是比較準,`MUGYEOM` 案例已驗證),但把 Vision 自己的
+                // 讀法併進 `ocrAlternates`(見 `TextRegion.alternateReadings`
+                // 的完整說明),讓模型自己判斷哪個讀法組得出通順的句子。
+                // 這是既有、已裝機驗證過的管道(2026-09-04 的 `SIGUIENDO`/
+                // `SIGLIIENDO` 那輪),只是餵進去的候選內容多了一個來源,
+                // prompt 文字本身一個字都沒改。
                 let cropRect = RegionCropper.padded(
                     region.pixelRect, pixelWidth: pixelWidth, pixelHeight: pixelHeight)
                 if let crop = RegionCropper.crop(page, toPixelRect: cropRect) {
@@ -599,14 +609,11 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
                     let lines = (await LiveTextRecognizer.recognizeLines(in: cropImage) ?? [])
                         .filter { !$0.isEmpty && !PageOutputParser.isDegenerateLine($0) }
                     if !lines.isEmpty {
-                        let candidate = lines.joined(separator: " ")
-                        let score = PageOutputParser.similarity(
-                            PageOutputParser.fold(region.visionText), PageOutputParser.fold(candidate))
-                        if score >= 0.3 {
-                            region.liveText = candidate
-                        }
+                        region.liveText = lines.joined(separator: " ")
                     }
                 }
+                let promptAlternates = region.alternateReadings()
+                let promptAlternatesText = promptAlternates.joined(separator: " / ")
 
                 // 第二段比對:裁圖+ImageAnalyzer 呼叫完,用校正後的
                 // `bestText` 再查一次黑白名單——涵蓋「詞庫存的拼法是
@@ -618,14 +625,14 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
                     blockDebugs.append(BlockDebug(
                         visionText: region.visionText, recognizedText: region.bestText,
                         translatedText: region.bestText, source: "純文字,黑名單(裁圖校正後)",
-                        ocrAlternates: alternatesText, liveText: region.liveText ?? ""))
+                        ocrAlternates: promptAlternatesText, liveText: region.liveText ?? ""))
                     continue
                 }
                 if let pinned = glossary.lookup(region.bestText) {
                     blockDebugs.append(BlockDebug(
                         visionText: region.visionText, recognizedText: region.bestText,
                         translatedText: pinned, source: "純文字,詞庫(裁圖校正後)",
-                        ocrAlternates: alternatesText, liveText: region.liveText ?? ""))
+                        ocrAlternates: promptAlternatesText, liveText: region.liveText ?? ""))
                     recentTextTranslations.append((original: region.bestText, translated: pinned))
                     if recentTextTranslations.count > Self.maxContextLines {
                         recentTextTranslations.removeFirst()
@@ -641,22 +648,34 @@ final class TranslationRequestCoordinator: NSObject, ObservableObject {
                 // 不到才退回 Vision 原始辨識結果——見 `TextRegion.bestText` 的
                 // 說明。除錯清單的「Vision:」欄位維持顯示 `visionText`(不變),
                 // 新增的「LiveText:」欄位顯示 `liveText`,方便對照兩者差異。
+                // `ocrAlternates` 這裡改傳 `promptAlternates`(含 Vision 主要
+                // 讀法),不是原本只有 Vision 第 2/3 名候選的
+                // `region.visionAlternates`——除錯清單的「OCR候選」要顯示
+                // 跟實際送進 prompt 一致的內容,才看得出 Vision 的讀法有沒有
+                // 真的被送給模型。
                 guard let result = try? await vlmEngine.translateText(
                     region.bestText, from: sourceLanguage, to: targetLanguage,
-                    context: recentTextTranslations, ocrAlternates: region.visionAlternates,
+                    context: recentTextTranslations, ocrAlternates: promptAlternates,
                     mangaOrigin: mangaOrigin) else {
+                    // 這個分支是 `try?` 吞掉的例外(呼叫本身失敗,例如模型
+                    // 沒載入成功),不是生成出爛內容——跟下面「生成完但內容
+                    // 不合格」是不同性質的失敗,不套用 `failureKind`(那是
+                    // 從 `rawOutput` 分類生成內容,這裡根本沒有生成過)。
                     blockDebugs.append(BlockDebug(
                         visionText: region.visionText, recognizedText: region.bestText,
-                        translatedText: VLMTranslationEngine.failureMessage, source: "純文字,失敗",
-                        ocrAlternates: alternatesText, liveText: region.liveText ?? ""))
+                        translatedText: VLMTranslationEngine.failureMessage, source: "純文字,失敗(呼叫失敗)",
+                        ocrAlternates: promptAlternatesText, liveText: region.liveText ?? ""))
                     continue
                 }
                 let translated = result.translated
+                let sourceLabel = translated == VLMTranslationEngine.failureMessage
+                    ? "純文字,失敗(\(VLMTranslationEngine.failureKind(forRawOutput: result.rawOutput)))"
+                    : "純文字"
                 blockDebugs.append(BlockDebug(
                     visionText: region.visionText, recognizedText: region.bestText,
-                    translatedText: translated,
-                    source: translated == VLMTranslationEngine.failureMessage ? "純文字,失敗" : "純文字",
-                    rawOutput: result.rawOutput, ocrAlternates: alternatesText, liveText: region.liveText ?? ""))
+                    translatedText: translated, source: sourceLabel,
+                    rawOutput: result.rawOutput, ocrAlternates: promptAlternatesText,
+                    liveText: region.liveText ?? ""))
                 guard translated != VLMTranslationEngine.failureMessage else { continue }
 
                 // 2026-09-07:翻成功、詞庫裡還沒有 → 先過第一階段字串啟發式,

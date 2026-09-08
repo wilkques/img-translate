@@ -307,8 +307,29 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     ///
     /// 第二版:**只有最後這次「簡化 prompt」重試**額外把溫度從 0.2 拉到
     /// 0.5(`textOnlyFinalRetryGenerateParameters`),前 3 次主要嘗試維持
-    /// 原本的溫度不變(不影響任何已經穩定的翻譯)。這是這輪唯一改動的
-    /// 變數,裝機驗證前不保證有效。
+    /// 原本的溫度不變(不影響任何已經穩定的翻譯)。**裝機驗證這版也沒有
+    /// 解決**——展開除錯清單才發現一個關鍵事實:失敗案例顯示的「原始
+    /// 輸出」其實是**第 4 次(簡化 prompt+溫度 0.5)**的結果,代表 prompt
+    /// 措辭跟溫度這兩個變數都已經被換過,模型還是只吐出輸入開頭的標點
+    /// (`?`、`...`)。這排除了「prompt 太複雜」「溫度太低太貪婪」這兩個
+    /// 假設,唯一還沒試過的變數只剩**送進去的文字本身**。
+    ///
+    /// 第三版(這輪):重試時把送進模型的文字**開頭**的標點(`¿`/`¡`/`.`/
+    /// `…`/`?`/`!` 這類)剝掉,只送實質內容,翻完如果原本有剝到刪節號就
+    /// 接回開頭。**只剝開頭、不剝結尾**——結尾標點不可能是模型生成的
+    /// 「第一個 token」,不是這次假設要測的變數,剝了只是多一個不相干的
+    /// 改動;**只接回刪節號、不接倒驚嘆號/倒問號**——`¿`/`¡` 是西班牙文
+    /// 專屬的前置標點,中文/英文/日文都沒有,原樣接回中文譯文前面只會
+    /// 產生不存在於目標語言的寫法。
+    ///
+    /// **只套用在重試(第 2、3、4 次),第一次嘗試維持原樣不受影響**——
+    /// 這個專案已經有過「為了救兩個難字動到對所有區塊都生效的主要路徑,
+    /// 反而拖垮原本翻對的句子」的教訓(`notes/2026-08-28.md` 第六輪:
+    /// 順序對調救不到難字,還讓 `YA BASTA...`/`ERES RUIDOSO..` 這兩句
+    /// 穩定案例變差)。剝開頭標點對這類問句(`¿VAS A COMÉRTELO O QUÉ?`
+    /// 這種目前翻得穩定的句子)是完全沒驗證過的新變數,只在第一次嘗試
+    /// 失敗後的重試才套用,把影響範圍鎖在本來就已經在失敗的那一小撮
+    /// 輸入上,不去動任何已經工作正常的路徑。
     func translateText(
         _ text: String, from source: String, to target: String,
         context: [(original: String, translated: String)] = [],
@@ -323,12 +344,12 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         for _ in 0..<maxRetries {
             lastResult = try await translateTextOnce(
                 text, from: source, to: target, context: context, ocrAlternates: ocrAlternates,
-                mangaOrigin: mangaOrigin)
+                mangaOrigin: mangaOrigin, stripLeadingPunctuation: true)
             if lastResult.translated != Self.failureMessage { return lastResult }
         }
         lastResult = try await translateTextOnce(
             text, from: source, to: target, context: context, ocrAlternates: ocrAlternates,
-            mangaOrigin: mangaOrigin, useSimplifiedPrompt: true)
+            mangaOrigin: mangaOrigin, useSimplifiedPrompt: true, stripLeadingPunctuation: true)
         return lastResult
     }
 
@@ -337,15 +358,20 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
         context: [(original: String, translated: String)],
         ocrAlternates: [String],
         mangaOrigin: String,
-        useSimplifiedPrompt: Bool = false
+        useSimplifiedPrompt: Bool = false,
+        stripLeadingPunctuation: Bool = false
     ) async throws -> (translated: String, rawOutput: String) {
         let sourceName = try LanguageNames.name(for: source)
         let targetName = try LanguageNames.name(for: target)
+
+        let (core, hadLeadingEllipsis) = stripLeadingPunctuation
+            ? Self.strippedLeadingPunctuation(text) : (text, false)
+
         let container = try await ensureLoaded()
         let prompt = useSimplifiedPrompt
-            ? Self.makeTextOnlyRetryPrompt(source: sourceName, target: targetName, text: text)
+            ? Self.makeTextOnlyRetryPrompt(source: sourceName, target: targetName, text: core)
             : Self.makeTextOnlyPrompt(
-                source: sourceName, target: targetName, text: text, context: context,
+                source: sourceName, target: targetName, text: core, context: context,
                 ocrAlternates: ocrAlternates, mangaOrigin: mangaOrigin)
 
         let userInput = UserInput(chat: [.user(prompt, images: [])])
@@ -359,7 +385,46 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
             if let chunk = event.chunk { raw += chunk }
         }
         let trimmedRaw = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        return (Self.parseTextOnly(trimmedRaw, originalText: text), trimmedRaw)
+        // `originalText` 傳剝過的 `core`——那才是模型看到、可能照抄的東西,
+        // `stripEchoedOriginalPrefix` 要比對的是它,不是原始帶標點的文字。
+        let parsed = Self.parseTextOnly(trimmedRaw, originalText: core)
+        // `rawOutput` 一律維持模型真正的原始輸出、不做任何加工,除錯清單
+        // 才分得出「模型實際說了什麼」跟「我們最後顯示什麼」。退化/重複
+        // 偵測(`parseTextOnly` 內部)要跑在模型自己的輸出上,把刪節號接
+        // 回去只能在確認不是失敗訊息之後才做,不然會讓垃圾輸出看起來
+        // 「有內容」。
+        guard parsed != Self.failureMessage else { return (parsed, trimmedRaw) }
+        guard hadLeadingEllipsis, !parsed.hasPrefix("."), !parsed.hasPrefix("…") else {
+            return (parsed, trimmedRaw)
+        }
+        return ("..." + parsed, trimmedRaw)
+    }
+
+    /// 2026-09-08:只剝**開頭**的標點(空白、`.`/`…`/`¿`/`¡`/`?`/`!`),
+    /// 句中跟結尾的標點完全不動——見 `translateText` 檔頭說明,結尾標點
+    /// 不可能是模型生成的第一個 token,不是這次假設要測的變數。
+    ///
+    /// 剝完如果完全沒有字母/數字內容(輸入整段都是標點,例如 `...`、
+    /// `¡¡¡!!!`)——沿用既有的 `PageOutputParser.hasUsableContent` 判斷,
+    /// 不新增一套空字串檢查——直接回傳原文、不剝,讓呼叫端照舊送完整
+    /// 原文給模型(這種純標點輸入本來就沒有「剝完更好翻」這回事,剝成
+    /// 空字串只會讓 prompt 更奇怪)。
+    private nonisolated static func strippedLeadingPunctuation(
+        _ text: String
+    ) -> (core: String, hadLeadingEllipsis: Bool) {
+        let edgeSet = CharacterSet(charactersIn: ".…¿¡?!").union(.whitespacesAndNewlines)
+        let scalars = Array(text.unicodeScalars)
+        var start = 0
+        var hadEllipsis = false
+        while start < scalars.count, edgeSet.contains(scalars[start]) {
+            if scalars[start] == "." || scalars[start] == "…" { hadEllipsis = true }
+            start += 1
+        }
+        var view = String.UnicodeScalarView()
+        for i in start..<scalars.count { view.append(scalars[i]) }
+        let core = String(view)
+        guard PageOutputParser.hasUsableContent(core) else { return (text, false) }
+        return (core, hadEllipsis)
     }
 
     /// 比 `generateParameters` 小很多——沒有圖片 token、沒有「先讀原文」這個
@@ -1035,8 +1100,34 @@ final class VLMTranslationEngine: ObservableObject, ImageTranslationEngine {
     /// ORIGINAL:/TRANSLATION: 標籤,原本的 fallback(抓不到就整段當譯文)會把這坨
     /// 垃圾直接顯示出來。加一道退化偵測,抓到就回傳明確的失敗訊息而不是垃圾文字,
     /// 除錯清單上至少看得出「這塊生成失敗」而不是誤以為翻譯結果就長這樣。
-    /// 生成失敗時顯示的訊息。也當成「這次要不要重試」的判斷依據。
-    static let failureMessage = "[生成失敗:輸出異常重複]"
+    /// 生成失敗時顯示的訊息。也當成「這次要不要重試」的判斷依據——`==`/`!=`
+    /// 這個常數的比對散落在 `TranslationRequestCoordinator.swift` 好幾處,
+    /// 決定要不要疊字/記上下文,**這個字串的值本身沒有任何地方寫死比對**,
+    /// 只有這個符號的身分是承重的,可以放心改文字。
+    ///
+    /// ⚠️ 2026-09-08:原文「輸出異常重複」對純文字模式的一種失敗形狀其實是
+    /// 文不對題——裝機抓到 `...¿QUÉ DEMONIOS PASÓ`/`¿EH? AH...` 這類短句,
+    /// 原始輸出是 `...`/`?` 這種幾乎沒有內容的純標點,觸發的是
+    /// `hasUsableContent` 檢查,根本不是重複偵測,但顯示出來的訊息卻說
+    /// 「重複」,誤導後續診斷。改成語意中性、涵蓋兩種失敗模式的字面,細部
+    /// 原因改用下面的 `failureKind(forRawOutput:)` 從 `rawOutput` 分類,
+    /// 顯示在除錯清單的「來源」欄位——不影響這個常數本身的任何比對。
+    static let failureMessage = "[生成失敗:模型沒有輸出有效譯文]"
+
+    /// 2026-09-08:只用來在除錯清單標示「這次失敗長什麼樣」,**不參與任何
+    /// 流程判斷**——`failureMessage` 依然是唯一的失敗哨兵值,所有 `==`/`!=`
+    /// 比對維持不變。純粹重用既有的退化偵測函式分類,不新增偵測邏輯。
+    /// 判斷順序有意義:「幾乎沒有輸出」要排第一,不然一個孤零零的「?」
+    /// 也會被後面的重複/殘缺標籤檢查判定成別的分類(它們對極短字串沒有
+    /// 意義,但不會主動排除)。
+    nonisolated static func failureKind(forRawOutput raw: String) -> String {
+        if !PageOutputParser.hasUsableContent(raw) { return "幾乎沒有輸出" }
+        if Self.isBareLabelFragment(raw) { return "殘缺標籤" }
+        if PageOutputParser.isDegenerateLine(raw) || Self.isDegenerateWordRepeat(raw) {
+            return "輸出異常重複"
+        }
+        return "未分類"
+    }
 
     nonisolated static func parse(_ raw: String) -> ImageRegionTranslation {
         var original = ""

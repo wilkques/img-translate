@@ -23,6 +23,45 @@ struct TextRegion: Identifiable {
     /// 才退回 Vision 原始辨識結果。`visionText` 本身維持不變,除錯清單需要
     /// 同時看到兩者才驗證得出這個修法有沒有生效。
     var bestText: String { liveText ?? visionText }
+
+    /// 2026-09-08:供純文字翻譯 prompt 的 `ocrAlternates` 欄位使用——這一塊
+    /// 文字的「其他可能讀法」,讓模型自己判斷哪個讀法組得出通順的句子。
+    ///
+    /// 起因:`bestText` 優先採用 `liveText`(`ImageAnalyzer`),但裝機抓到
+    /// `ImageAnalyzer` 在裁圖後偶爾讀得比 Vision 本身還離譜(案例:Vision
+    /// 讀「ARE ANTES」,裁圖後 `ImageAnalyzer` 讀成「NEE ANTES」)。原本
+    /// 想在兩者之間「二選一」(相似度不夠就退回 Vision),但字元相似度
+    /// 對「開頭一個字讀錯、其餘共用」這種錯誤天生不敏感(`ARE ANTES` 跟
+    /// `NEE ANTES` 共用整個 `ANTES` 字尾,折疊後相似度依然很高,擋不掉;
+    /// 提高門檻又會連 `MLGYEOM`→`MUGYEOM` 這種真正該採用的單字母校正
+    /// 一起擋掉,兩者落在同一個相似度區間)——這條路線已經証實走不通。
+    ///
+    /// 改成不挑,兩個讀法都給模型:`bestText` 照舊當主要文字(平均而言
+    /// `ImageAnalyzer` 還是比較準,`MUGYEOM` 案例是已驗證的成功案例),
+    /// 但把 `visionText`(另一顆引擎的獨立讀法,資訊量比 Vision 自己的
+    /// 第 2、3 名候選高很多)併進 `ocrAlternates` 清單,讓模型自己判斷。
+    /// `liveText == nil` 時 `bestText == visionText`,`visionText` 會被
+    /// 下面的去重擋掉,行為跟改動前逐字元相同,不影響絕大多數案例。
+    ///
+    /// 上限 3 筆——`notes/2026-09-01.md` 已經證實 prompt 總指令量是這顆
+    /// 模型的失敗驅動因素之一。順帶注意:合併過的多行區塊(`merge` 把
+    /// 每行的候選 `a.alternates + b.alternates` 攤平相加)原本可能累積到
+    /// 5、6 筆候選,這個上限同時也讓合併區塊的候選數量變少,不是只在
+    /// 這次新增的來源上加量。
+    func alternateReadings(max: Int = 3) -> [String] {
+        var seen = Set([PageOutputParser.fold(bestText)])
+        var result: [String] = []
+        for candidate in [visionText] + visionAlternates {
+            guard result.count < max else { break }
+            let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let key = PageOutputParser.fold(trimmed)
+            guard !key.isEmpty, !seen.contains(key) else { continue }
+            seen.insert(key)
+            result.append(trimmed)
+        }
+        return result
+    }
 }
 
 enum RegionMerger {
